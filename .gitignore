@@ -19,6 +19,12 @@ dist/
 # logs
 bot.log
 
+# runtime data
+penpal.sqlite
+*.sqlite
+run/
+*.pid
+
 # VSCode
 .vscode/
 
