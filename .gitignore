@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+build/
+dist/
+.eggs/
+*.egg-info/
+.python-version
+
+# dotenv
+.env
+
+# logs
+bot.log
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# pip cache
+pip-log.txt
+
+# PyCharm
+.idea/
