@@ -1,0 +1,12 @@
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+select = ["E", "F", "W"]
+ignore = ["E203", "E501"]  # ignore long lines and slice-spacing quirks
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.isort]
+profile = "black"
