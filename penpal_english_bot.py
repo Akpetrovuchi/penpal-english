@@ -95,19 +95,6 @@ TOPIC_FEEDS = {
 TOPIC_CHOICES = list(TOPIC_FEEDS.keys())
 DEFAULT_FEEDS = [url for urls in TOPIC_FEEDS.values() for url in urls]
 
-BUDDY_TOPICS = [
-    "ordering food at a cafe",
-    "booking a surfing lesson",
-    "discussing an interesting article",
-    "planning a weekend city break",
-    "making small talk at a networking event",
-    "arranging a doctor appointment",
-    "organizing a surprise birthday party",
-    "preparing for a job interview",
-    "chatting about a favorite movie night",
-    "asking a friend to help with homework",
-]
-
 
 # Fetch helper with a real browser user-agent (prevents some RSS blocks)
 import urllib.request
@@ -299,15 +286,6 @@ def level_keyboard():
     btns = [[InlineKeyboardButton(l, callback_data=f"level:{l}") for l in levels]]
     return InlineKeyboardMarkup(inline_keyboard=btns)
 
-
-def buddy_options_keyboard():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton("🤖 Chat with AI Buddy", callback_data="buddy:start")],
-            [InlineKeyboardButton("🎯 Choose topics", callback_data="buddy:topics")],
-        ]
-    )
-
 async def send_news(user_id):
     try:
         user = get_user(user_id)
@@ -385,42 +363,7 @@ async def start(m: types.Message):
 async def choose_level(c: types.CallbackQuery):
     level = c.data.split(":")[1]
     set_user_level(c.from_user.id, level)
-    await c.answer()
-    await c.message.edit_text(
-        f"Great! Level set to <b>{level}</b>.\n\nWant to jump into a quick chat or pick your interests first?",
-        reply_markup=buddy_options_keyboard(),
-    )
-
-
-@dp.callback_query_handler(lambda c: c.data == "buddy:topics")
-async def buddy_choose_topics(c: types.CallbackQuery):
-    await c.answer()
-    user = get_user(c.from_user.id)
-    current = (user[3] or "").split(",") if user and user[3] else []
-    await c.message.edit_text("Pick topics you like:", reply_markup=topic_keyboard(current))
-
-
-@dp.callback_query_handler(lambda c: c.data == "buddy:start")
-async def buddy_start_chat(c: types.CallbackQuery):
-    await c.answer("Let’s chat!", show_alert=False)
-    topic = random.choice(BUDDY_TOPICS)
-    await c.message.edit_text(
-        "Awesome! Here’s a random chat idea. Reply when you’re ready.",
-        reply_markup=None,
-    )
-    scenario_note = f"[AI Buddy scenario] {topic}"
-    save_msg(c.from_user.id, "user", scenario_note)
-    intro_prompt = (
-        "Start a friendly role-play with the learner. Scenario: "
-        f"{topic}. In 2 short sentences set the scene and invite them to respond."
-    )
-    reply = await gpt_chat([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": intro_prompt},
-    ])
-    text = f"🎲 <b>Random topic:</b> {topic}\n\n{reply}"
-    save_msg(c.from_user.id, "assistant", text)
-    await bot.send_message(c.from_user.id, text)
+    await c.message.edit_text(f"Great! Level set to <b>{level}</b>.\n\nPick topics you like:", reply_markup=topic_keyboard([]))
 
 @dp.callback_query_handler(lambda c: c.data.startswith("topic:"))
 async def choose_topics(c: types.CallbackQuery):
