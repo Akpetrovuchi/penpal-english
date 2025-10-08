@@ -429,7 +429,6 @@ async def send_news(user_id):
                 logging.exception("GNews lookup failed for topic %s", t)
                 articles = []
             if articles:
-                chosen_topic = t
                 break
 
         if articles:
