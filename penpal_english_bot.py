@@ -796,7 +796,7 @@ async def start(m: types.Message):
             "Привет! Я <b>PenPal English</b> 👋 — твой дружелюбный собеседник по английскому.\n\nКакой у тебя уровень?",
             reply_markup=level_keyboard(),
         )
-    except Exception as e:
+    except Exception:
         logging.exception("Failed to send /start reply; falling back to safe message")
         # send a safe non-empty fallback so Telegram doesn't reject it
         try:
