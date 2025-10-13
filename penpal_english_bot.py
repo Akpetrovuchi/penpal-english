@@ -737,7 +737,7 @@ async def send_news(user_id):
         with closing(db()) as conn:
             c = conn.cursor()
             c.execute(
-                "INSERT INTO news_cache(url, title, summary, published_at, questions) VALUES(?,?,?,?,?)",
+                "INSERT INTO news_cache(url, title, summary, published_at, questions) VALUES(%s, %s, %s, %s, %s)",
                 (
                     url,
                     title,
@@ -746,7 +746,7 @@ async def send_news(user_id):
                     json.dumps(data.get("questions", [])),
                 ),
             )
-            cache_id = c.lastrowid
+            cache_id = c.lastrowid if hasattr(c, 'lastrowid') else None
             conn.commit()
 
         kb = InlineKeyboardMarkup(
