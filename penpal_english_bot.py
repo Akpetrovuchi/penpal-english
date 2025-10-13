@@ -471,7 +471,8 @@ async def daily_sender_loop():
                                 await bot.send_message(u["id"], "👋 Hi! I have a fresh news for you today — shall we discuss it?", reply_markup=mode_keyboard())
                                 # update last_daily_sent
                                 with closing(db()) as conn:
-                                    conn.execute("UPDATE users SET last_daily_sent=? WHERE id=?", (date.today().isoformat(), u["id"]))
+                                    c = conn.cursor()
+                                    c.execute("UPDATE users SET last_daily_sent=%s WHERE id=%s", (date.today().isoformat(), u["id"]))
                                     conn.commit()
                             except Exception:
                                 logging.exception("Failed to send daily message to user %s", u.get("id"))
@@ -1002,11 +1003,9 @@ async def news_translate(c: types.CallbackQuery):
     parts = c.data.split(":")
     cache_id = int(parts[2])
     with closing(db()) as conn:
-        row = (
-            conn.cursor()
-            .execute("SELECT title, summary FROM news_cache WHERE id=?", (cache_id,))
-            .fetchone()
-        )
+        c_db = conn.cursor()
+        c_db.execute("SELECT title, summary FROM news_cache WHERE id=%s", (cache_id,))
+        row = c_db.fetchone()
     if not row:
         await c.answer("Не удалось найти статью.", show_alert=True)
         return
@@ -1030,11 +1029,9 @@ async def news_done(c: types.CallbackQuery):
     parts = c.data.split(":")
     cache_id = int(parts[2])
     with closing(db()) as conn:
-        row = (
-            conn.cursor()
-            .execute("SELECT questions FROM news_cache WHERE id=?", (cache_id,))
-            .fetchone()
-        )
+        c_db = conn.cursor()
+        c_db.execute("SELECT questions FROM news_cache WHERE id=%s", (cache_id,))
+        row = c_db.fetchone()
     if not row:
         await c.answer("Не удалось найти статью.", show_alert=True)
         return
@@ -1065,11 +1062,9 @@ async def news_next(c: types.CallbackQuery):
     cache_id = int(parts[2])
     idx = int(parts[3])
     with closing(db()) as conn:
-        row = (
-            conn.cursor()
-            .execute("SELECT questions FROM news_cache WHERE id=?", (cache_id,))
-            .fetchone()
-        )
+        c_db = conn.cursor()
+        c_db.execute("SELECT questions FROM news_cache WHERE id=%s", (cache_id,))
+        row = c_db.fetchone()
     if not row:
         await c.answer("Не удалось найти статью.", show_alert=True)
         return
@@ -1168,11 +1163,12 @@ async def cmd_news(m: types.Message):
 @dp.message_handler(commands=["review"])
 async def cmd_review(m: types.Message):
     with closing(db()) as conn:
-        c = conn.cursor()
-        items = c.execute(
-            "SELECT phrase, example, bin FROM vocab WHERE user_id=? ORDER BY bin ASC, added_at DESC LIMIT 6",
-            (m.from_user.id,),
-        ).fetchall()
+        c_db = conn.cursor()
+        c_db.execute(
+            "SELECT phrase, example, bin FROM vocab WHERE user_id=%s ORDER BY bin ASC, added_at DESC LIMIT 6",
+            (m.from_user.id,)
+        )
+        items = c_db.fetchall()
     if not items:
         await m.answer(
             "No vocab yet — chat a bit or try /news and I’ll save useful phrases for you. ✨"
