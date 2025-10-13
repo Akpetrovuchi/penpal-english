@@ -36,15 +36,11 @@ bot = Bot(BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-DB_URL = os.getenv("DATABASE_URL")
-if not DB_URL:
-    # Build from individual env vars if DATABASE_URL is not set
-    host = os.getenv("POSTGRES_HOST", "localhost")
-    port = os.getenv("POSTGRES_PORT", "5432")
-    db = os.getenv("POSTGRES_DB", "penpal_english")
-    user = os.getenv("POSTGRES_USER", "your_db_user")
-    password = os.getenv("POSTGRES_PASSWORD", "your_db_password")
-    DB_URL = f"postgresql://{user}:{password}@{host}:{port}/{db}"
+from contextlib import closing
+from db import db
+DB_URL = os.getenv("DATABASE_URL") or (
+    f"postgresql://{os.getenv('POSTGRES_USER', 'your_db_user')}:{os.getenv('POSTGRES_PASSWORD', 'your_db_password')}@{os.getenv('POSTGRES_HOST', 'localhost')}:{os.getenv('POSTGRES_PORT', '5432')}/{os.getenv('POSTGRES_DB', 'penpal_english')}"
+)
 
 # GNews categories - present these to users
 TOPIC_CHOICES = [
