@@ -2,7 +2,8 @@
 import os
 import json
 import logging
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import random
 from datetime import datetime, date
 from contextlib import closing
@@ -35,7 +36,15 @@ bot = Bot(BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-DB = "penpal.sqlite"
+DB_URL = os.getenv("DATABASE_URL")
+if not DB_URL:
+    # Build from individual env vars if DATABASE_URL is not set
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = os.getenv("POSTGRES_PORT", "5432")
+    db = os.getenv("POSTGRES_DB", "penpal_english")
+    user = os.getenv("POSTGRES_USER", "your_db_user")
+    password = os.getenv("POSTGRES_PASSWORD", "your_db_password")
+    DB_URL = f"postgresql://{user}:{password}@{host}:{port}/{db}"
 
 # GNews categories - present these to users
 TOPIC_CHOICES = [
@@ -330,64 +339,54 @@ Use at most 3 corrections per reply unless the user asks for full-sentence revie
 
 
 def db():
-    return sqlite3.connect(DB)
+    return psycopg2.connect(DB_URL, cursor_factory=psycopg2.extras.DictCursor)
 
 
 def init_db():
     with closing(db()) as conn:
         c = conn.cursor()
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS users(
-            id INTEGER PRIMARY KEY,
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS users(
+            id SERIAL PRIMARY KEY,
             tg_username TEXT,
             level TEXT,
             topics TEXT,
             mode TEXT,
             created_at TEXT,
-            last_news_url TEXT)"""
+            last_news_url TEXT,
+            timezone TEXT,
+            last_daily_sent TEXT,
+            last_interaction TEXT
         )
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS messages(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, role TEXT, content TEXT, created_at TEXT)"""
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS messages(
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER,
+            role TEXT,
+            content TEXT,
+            created_at TEXT
         )
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS vocab(
-            user_id INTEGER, phrase TEXT, example TEXT, added_at TEXT, bin INTEGER DEFAULT 1)"""
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS vocab(
+            user_id INTEGER,
+            phrase TEXT,
+            example TEXT,
+            added_at TEXT,
+            bin INTEGER DEFAULT 1
         )
-        c.execute(
-            """CREATE TABLE IF NOT EXISTS news_cache(
-            id INTEGER PRIMARY KEY AUTOINCREMENT, url TEXT, title TEXT, summary TEXT, published_at TEXT)"""
+        """)
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS news_cache(
+            id SERIAL PRIMARY KEY,
+            url TEXT,
+            title TEXT,
+            summary TEXT,
+            published_at TEXT,
+            questions TEXT
         )
-        # Add questions column if it doesn't exist (safe to run repeatedly)
-        try:
-            c.execute("ALTER TABLE news_cache ADD COLUMN questions TEXT")
-        except Exception:
-            # column probably exists already
-            pass
-        # Add per-user mode preference if it doesn't exist
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN mode TEXT")
-        except Exception:
-            pass
-        # Add per-user last_news_url to users table if missing
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN last_news_url TEXT")
-        except Exception:
-            # column probably exists already
-            pass
-        # Add timezone and last_daily_sent columns
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN timezone TEXT")
-        except Exception:
-            pass
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN last_daily_sent TEXT")
-        except Exception:
-            pass
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN last_interaction TEXT")
-        except Exception:
-            pass
+        """)
         conn.commit()
 
 
@@ -395,7 +394,11 @@ def save_user(user_id, username):
     with closing(db()) as conn:
         c = conn.cursor()
         c.execute(
-            "INSERT OR IGNORE INTO users(id, tg_username, created_at) VALUES(?,?,?)",
+            """
+            INSERT INTO users (id, tg_username, created_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (id) DO NOTHING
+            """,
             (user_id, username, datetime.utcnow().isoformat()),
         )
         conn.commit()
@@ -403,50 +406,52 @@ def save_user(user_id, username):
 
 def set_user_level(user_id, level):
     with closing(db()) as conn:
-        conn.execute("UPDATE users SET level=? WHERE id=?", (level, user_id))
+        c = conn.cursor()
+        c.execute("UPDATE users SET level=%s WHERE id=%s", (level, user_id))
         conn.commit()
 
 
 def set_user_topics(user_id, topics):
     with closing(db()) as conn:
-        conn.execute("UPDATE users SET topics=? WHERE id=?", (",".join(topics), user_id))
+        c = conn.cursor()
+        c.execute("UPDATE users SET topics=%s WHERE id=%s", (",".join(topics), user_id))
         conn.commit()
 
 
 def get_user(user_id):
     with closing(db()) as conn:
-        conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        row = c.execute(
-            "SELECT id, tg_username, level, topics, mode, last_news_url FROM users WHERE id= ?",
-            (user_id,),
-        ).fetchone()
+        c.execute("SELECT id, tg_username, level, topics, mode, last_news_url, timezone, last_daily_sent, last_interaction FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
     return dict(row) if row else None
 
 
 def set_user_mode(user_id, mode):
     with closing(db()) as conn:
-        conn.execute("UPDATE users SET mode=? WHERE id=?", (mode, user_id))
+        c = conn.cursor()
+        c.execute("UPDATE users SET mode=%s WHERE id=%s", (mode, user_id))
         conn.commit()
 
 
 def set_user_last_news(user_id, url):
     with closing(db()) as conn:
-        conn.execute("UPDATE users SET last_news_url=? WHERE id=?", (url, user_id))
+        c = conn.cursor()
+        c.execute("UPDATE users SET last_news_url=%s WHERE id=%s", (url, user_id))
         conn.commit()
 
 
 def set_user_timezone(user_id, tz_name):
     with closing(db()) as conn:
-        conn.execute("UPDATE users SET timezone=? WHERE id=?", (tz_name, user_id))
+        c = conn.cursor()
+        c.execute("UPDATE users SET timezone=%s WHERE id=%s", (tz_name, user_id))
         conn.commit()
 
 
 def get_all_users_for_daily():
     with closing(db()) as conn:
-        conn.row_factory = sqlite3.Row
         c = conn.cursor()
-        rows = c.execute("SELECT id, tg_username, last_daily_sent, last_interaction FROM users").fetchall()
+        c.execute("SELECT id, tg_username, last_daily_sent, last_interaction FROM users")
+        rows = c.fetchall()
     return [dict(r) for r in rows]
 
 
@@ -484,19 +489,19 @@ async def daily_sender_loop():
 def save_msg(user_id, role, content):
     with closing(db()) as conn:
         now = datetime.utcnow().isoformat()
-        conn.execute(
-            "INSERT INTO messages(user_id, role, content, created_at) VALUES(?,?,?,?)",
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO messages(user_id, role, content, created_at) VALUES(%s, %s, %s, %s)",
             (user_id, role, content, now),
         )
         # update last interaction on users table
         try:
-            conn.execute("UPDATE users SET last_interaction=? WHERE id=?", (now, user_id))
+            c.execute("UPDATE users SET last_interaction=%s WHERE id=%s", (now, user_id))
         except Exception:
             logging.exception("Failed to update last_interaction")
         # keep last 30
-        conn.execute(
-            """DELETE FROM messages WHERE id NOT IN (
-            SELECT id FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 30) AND user_id=?""",
+        c.execute(
+            "DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 30) AND user_id=%s",
             (user_id, user_id),
         )
         conn.commit()
@@ -504,9 +509,10 @@ def save_msg(user_id, role, content):
 
 def add_vocab(user_id, items):
     with closing(db()) as conn:
+        c = conn.cursor()
         for it in items:
-            conn.execute(
-                "INSERT INTO vocab(user_id, phrase, example, added_at) VALUES(?,?,?,?)",
+            c.execute(
+                "INSERT INTO vocab(user_id, phrase, example, added_at) VALUES(%s, %s, %s, %s)",
                 (
                     user_id,
                     it.get("phrase", ""),
