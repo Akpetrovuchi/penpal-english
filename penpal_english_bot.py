@@ -757,6 +757,7 @@ async def send_news(user_id):
 
 @dp.message_handler(commands=["start"])
 async def start(m: types.Message):
+    save_msg(m.from_user.id, "user", "/start")
     save_user(m.from_user.id, m.from_user.username or "")
     # Reset topics for this user when they press /start
     try:
@@ -780,6 +781,7 @@ async def start(m: types.Message):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("level:"))
 async def choose_level(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     level = c.data.split(":")[1]
     user_id = c.from_user.id
     # If user chose unknown, start the quick word-selection flow
@@ -805,6 +807,7 @@ async def choose_level(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("mode:"))
 async def choose_mode(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     user_id = c.from_user.id
     mode = c.data.split(":")[1]
     if mode not in {"news", "chat"}:
@@ -829,6 +832,7 @@ async def choose_mode(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("chat:topic:"))
 async def choose_chat_topic(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     user_id = c.from_user.id
     parts = c.data.split(":")
     topic_key = parts[2]
@@ -881,6 +885,7 @@ async def choose_chat_topic(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("topic:"))
 async def choose_topics(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     user = get_user(c.from_user.id)
     if not user:
         await c.answer("Не удалось найти профиль. Попробуй /start.", show_alert=True)
@@ -909,6 +914,7 @@ async def choose_topics(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("word:toggle:"))
 async def toggle_word(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     # Toggle the selected word for the user
     parts = c.data.split(":")
     word = parts[2]
@@ -926,6 +932,7 @@ async def toggle_word(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "word:done")
 async def finalize_word_selection(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     uid = c.from_user.id
     sel = USER_WORD_SELECTIONS.get(uid, set())
     count = len(sel)
@@ -953,12 +960,14 @@ async def finalize_word_selection(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:more"))
 async def more_news(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     await c.answer("Загружаю другую статью… ⏳")
     await send_news(c.from_user.id)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("ans:"))
 async def answer_hint(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     idx = int(c.data.split(":")[1])
     prompts = [
         "Напиши свой ответ на вопрос 1 👇",
@@ -970,6 +979,7 @@ async def answer_hint(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:translate:"))
 async def news_translate(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     parts = c.data.split(":")
     cache_id = int(parts[2])
     with closing(db()) as conn:
@@ -996,6 +1006,7 @@ async def news_translate(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:done:"))
 async def news_done(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     parts = c.data.split(":")
     cache_id = int(parts[2])
     with closing(db()) as conn:
@@ -1027,6 +1038,7 @@ async def news_done(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:next:"))
 async def news_next(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
     # callback format: news:next:<cache_id>:<index>
     parts = c.data.split(":")
     cache_id = int(parts[2])
@@ -1059,6 +1071,7 @@ async def news_next(c: types.CallbackQuery):
 
 @dp.message_handler(commands=["topics"])
 async def cmd_topics(m: types.Message):
+    save_msg(m.from_user.id, "user", "/topics")
     user = get_user(m.from_user.id)
     current = (user.get("topics") or "").split(",") if user and user.get("topics") else []
     await m.answer("Update your interests 🌟:", reply_markup=topic_keyboard(current))
@@ -1066,6 +1079,7 @@ async def cmd_topics(m: types.Message):
 
 @dp.message_handler(commands=["stats"])
 async def cmd_stats(m: types.Message):
+    save_msg(m.from_user.id, "user", "/stats")
     """Return basic usage statistics from the SQLite database.
 
     Queries performed:
@@ -1122,11 +1136,13 @@ async def cmd_stats(m: types.Message):
 
 @dp.message_handler(commands=["level"])
 async def cmd_level(m: types.Message):
+    save_msg(m.from_user.id, "user", "/level")
     await m.answer("Pick your level 🎯:", reply_markup=level_keyboard())
 
 
 @dp.message_handler(commands=["news"])
 async def cmd_news(m: types.Message):
+    save_msg(m.from_user.id, "user", "/news")
     await send_news(m.from_user.id)
 
 
@@ -1152,6 +1168,7 @@ async def cmd_review(m: types.Message):
 
 @dp.message_handler(commands=["help"])
 async def cmd_help(m: types.Message):
+    save_msg(m.from_user.id, "user", "/help")
     await m.answer(
         "Try /news for a fresh topic 📰, /topics to change interests, /level to adjust difficulty, /review for phrases. Or just chat with me in English! 😊"
     )
@@ -1159,6 +1176,7 @@ async def cmd_help(m: types.Message):
 
 @dp.message_handler(commands=["settz"])
 async def cmd_settz(m: types.Message):
+    save_msg(m.from_user.id, "user", m.text)
     """Set user timezone. Usage: /settz Europe/Moscow"""
     parts = (m.text or "").split()
     if len(parts) < 2:
