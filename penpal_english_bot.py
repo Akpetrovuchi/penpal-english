@@ -597,12 +597,12 @@ def topic_keyboard(selected=None):
     if row:
         rows.append(row)
     rows.append([InlineKeyboardButton("Готово ✔️", callback_data="topic:done")])
+    # Кнопка 'Меню' убрана для выбора темы
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def level_keyboard():
     levels = ["A2", "B1", "B2", "C1"]
-    # top row: compact level buttons; second row: full-width "I don't know" button
     top_row = [InlineKeyboardButton(l, callback_data=f"level:{l}") for l in levels]
     unknown_row = [InlineKeyboardButton("Я не знаю", callback_data="level:unknown")]
     return InlineKeyboardMarkup(inline_keyboard=[top_row, unknown_row])
@@ -616,7 +616,6 @@ def render_word_selection_kb(user_id):
     words = ["River", "Rarely", "Whale", "Ambiguous", "Gossip", "Knowledge"]
     sel = USER_WORD_SELECTIONS.get(user_id, set())
     kb_rows = []
-    # two buttons per row
     for i in range(0, len(words), 2):
         row = []
         for w in words[i : i + 2]:
@@ -624,6 +623,7 @@ def render_word_selection_kb(user_id):
             row.append(InlineKeyboardButton(f"{mark}{w}", callback_data=f"word:toggle:{w}"))
         kb_rows.append(row)
     kb_rows.append([InlineKeyboardButton("Готово ✔️", callback_data="word:done")])
+    # Кнопка 'Меню' убрана для определения уровня по словам
     return InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
 
@@ -632,6 +632,7 @@ def mode_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton("Обсудить статью 📰", callback_data="mode:news")],
             [InlineKeyboardButton("Свободный разговор 💬", callback_data="mode:chat")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
         ]
     )
 
@@ -644,6 +645,7 @@ def onboarding_goal_kb():
         [InlineKeyboardButton("Экзамен / сертификат 🎓", callback_data="onboard:goal:exam")],
         [InlineKeyboardButton("Свободное общение 🗣️", callback_data="onboard:goal:conversation")],
         [InlineKeyboardButton("Другое ✨", callback_data="onboard:goal:other")],
+    # Кнопка 'Меню' убрана из онбординга
     ])
 
 def onboarding_interest_kb():
@@ -652,6 +654,7 @@ def onboarding_interest_kb():
         [InlineKeyboardButton("AI-собеседник 🤖", callback_data="onboard:interest:ai")],
         [InlineKeyboardButton("Тренировать грамматику 📚", callback_data="onboard:interest:grammar")],
         [InlineKeyboardButton("Всё интересно! ✨", callback_data="onboard:interest:all")],
+    # Кнопка 'Меню' убрана из онбординга
     ])
 
 def onboarding_minutes_kb():
@@ -659,6 +662,7 @@ def onboarding_minutes_kb():
         [InlineKeyboardButton("5 мин ⏱", callback_data="onboard:minutes:5"), InlineKeyboardButton("10 мин 🔟", callback_data="onboard:minutes:10")],
         [InlineKeyboardButton("15 мин 🧠", callback_data="onboard:minutes:15"), InlineKeyboardButton("20+ мин 🚀", callback_data="onboard:minutes:20")],
         [InlineKeyboardButton("Не знаю 🤷", callback_data="onboard:minutes:unknown")],
+    # Кнопка 'Меню' убрана из онбординга
     ])
 
 
@@ -1281,6 +1285,14 @@ async def cmd_help(m: types.Message):
     save_msg(m.from_user.id, "user", "/help")
     await m.answer(
         "Try /news for a fresh topic 📰, /topics to change interests, /level to adjust difficulty, /review for phrases. Or just chat with me in English! 😊"
+    )
+
+@dp.message_handler(commands=["menu"])
+async def cmd_menu(m: types.Message):
+    save_msg(m.from_user.id, "user", "/menu")
+    await m.answer(
+        "Меню активности — выбери, что хочешь сделать:",
+        reply_markup=mode_keyboard()
     )
 
 
