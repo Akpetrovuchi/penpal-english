@@ -632,7 +632,6 @@ def mode_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton("Обсудить статью 📰", callback_data="mode:news")],
             [InlineKeyboardButton("Свободный разговор 💬", callback_data="mode:chat")],
-            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
         ]
     )
 
@@ -780,6 +779,7 @@ async def send_news(user_id):
                     InlineKeyboardButton("Завершил(а) ✅", callback_data=f"news:done:{cache_id}"),
                 ],
                 [InlineKeyboardButton("Поменять статью 🔁", callback_data="news:more")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
             ]
         )
 
@@ -1117,6 +1117,7 @@ async def news_done(c: types.CallbackQuery):
         inline_keyboard=[
             [InlineKeyboardButton("Другой вопрос 🔁", callback_data=f"news:next:{cache_id}:1")],
             [InlineKeyboardButton("Поменять статью 🔁", callback_data="news:more")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
         ]
     )
     await bot.send_message(c.from_user.id, instr + q0, reply_markup=kb)
@@ -1141,7 +1142,6 @@ async def news_next(c: types.CallbackQuery):
         await c.answer("No more questions.", show_alert=True)
         return
     q = questions[idx]
-    # Prepare next index (wrap or stop at end)
     next_idx = idx + 1
     kb_buttons = []
     if next_idx < len(questions):
@@ -1151,8 +1151,17 @@ async def news_next(c: types.CallbackQuery):
             )
         )
     kb_buttons.append(InlineKeyboardButton("Поменять статью 🔁", callback_data="news:more"))
+    kb_buttons.append(InlineKeyboardButton("Меню 🏠", callback_data="menu:main"))
     kb = InlineKeyboardMarkup(inline_keyboard=[kb_buttons])
     await bot.send_message(c.from_user.id, q, reply_markup=kb)
+
+@dp.callback_query_handler(lambda c: c.data == "menu:main")
+async def menu_main_callback(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.edit_text(
+        "Меню активности — выбери, что хочешь сделать:",
+        reply_markup=mode_keyboard()
+    )
 
 
 @dp.message_handler(commands=["topics"])
