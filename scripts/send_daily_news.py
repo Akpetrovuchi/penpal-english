@@ -20,6 +20,9 @@ async def main():
         if tz and tz != "UTC":
             continue
         try:
+            # Send Russian greeting before news
+            from penpal_english_bot import bot, mode_keyboard
+            await bot.send_message(user_id, "👋 Привет! У меня для тебя свежая новость — обсудим?", reply_markup=mode_keyboard())
             await send_news(user_id)
             logging.info(f"Sent daily news to user {user_id}")
         except Exception as e:
