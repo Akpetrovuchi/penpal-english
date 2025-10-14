@@ -352,7 +352,10 @@ def init_db():
             last_news_url TEXT,
             timezone TEXT,
             last_daily_sent TEXT,
-            last_interaction TEXT
+            last_interaction TEXT,
+            goal TEXT,
+            feeling TEXT,
+            daily_minutes INTEGER
         )
         """)
         c.execute("""
@@ -440,6 +443,24 @@ def set_user_timezone(user_id, tz_name):
     with closing(db()) as conn:
         c = conn.cursor()
         c.execute("UPDATE users SET timezone=%s WHERE id=%s", (tz_name, user_id))
+        conn.commit()
+
+def set_user_goal(user_id, goal):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET goal=%s WHERE id=%s", (goal, user_id))
+        conn.commit()
+
+def set_user_feeling(user_id, feeling):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET feeling=%s WHERE id=%s", (feeling, user_id))
+        conn.commit()
+
+def set_user_daily_minutes(user_id, minutes):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET daily_minutes=%s WHERE id=%s", (minutes, user_id))
         conn.commit()
 
 
@@ -614,6 +635,33 @@ def mode_keyboard():
         ]
     )
 
+# Onboarding keyboards
+def onboarding_goal_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Работа / карьера 💼", callback_data="onboard:goal:career")],
+        [InlineKeyboardButton("Путешествия ✈️", callback_data="onboard:goal:travel")],
+        [InlineKeyboardButton("Переезд 🌍", callback_data="onboard:goal:relocation")],
+        [InlineKeyboardButton("Экзамен / сертификат 🎓", callback_data="onboard:goal:exam")],
+        [InlineKeyboardButton("Свободное общение 🗣️", callback_data="onboard:goal:conversation")],
+        [InlineKeyboardButton("Другое ✨", callback_data="onboard:goal:other")],
+    ])
+
+def onboarding_interest_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Обсудить свежие новости 📰", callback_data="onboard:interest:news")],
+        [InlineKeyboardButton("AI-собеседник 🤖", callback_data="onboard:interest:ai")],
+        [InlineKeyboardButton("Тренировать грамматику 📚", callback_data="onboard:interest:grammar")],
+        [InlineKeyboardButton("Всё интересно! ✨", callback_data="onboard:interest:all")],
+    ])
+
+def onboarding_minutes_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("5 мин ⏱", callback_data="onboard:minutes:5"), InlineKeyboardButton("10 мин 🔟", callback_data="onboard:minutes:10")],
+        [InlineKeyboardButton("15 мин 🧠", callback_data="onboard:minutes:15"), InlineKeyboardButton("20+ мин 🚀", callback_data="onboard:minutes:20")],
+        [InlineKeyboardButton("Не знаю 🤷", callback_data="onboard:minutes:unknown")],
+    ])
+
+
 
 async def send_news(user_id):
     try:
@@ -759,24 +807,58 @@ async def send_news(user_id):
 async def start(m: types.Message):
     save_msg(m.from_user.id, "user", "/start")
     save_user(m.from_user.id, m.from_user.username or "")
-    # Reset topics for this user when they press /start
+    # Reset topics and onboarding fields for this user
     try:
         set_user_topics(m.from_user.id, [])
         set_user_mode(m.from_user.id, None)
+        set_user_goal(m.from_user.id, None)
+        set_user_feeling(m.from_user.id, None)
+        set_user_daily_minutes(m.from_user.id, None)
     except Exception:
-        logging.exception("Failed to reset user topics on /start")
+        logging.exception("Failed to reset user topics/onboarding on /start")
     try:
         await m.answer(
-            "Привет! Я <b>PenPal English</b> 👋 — твой дружелюбный собеседник по английскому.\n\nКакой у тебя уровень?",
-            reply_markup=level_keyboard(),
+            "Привет! Я <b>Макс</b> 👋\n\nПеред тем как выбрать уровень, расскажи о себе:\n\n<b>Какая твоя главная цель в изучении английского?</b>",
+            reply_markup=onboarding_goal_kb(),
         )
     except Exception:
-        logging.exception("Failed to send /start reply; falling back to safe message")
-        # send a safe non-empty fallback so Telegram doesn't reject it
+        logging.exception("Failed to send onboarding goal; falling back to safe message")
         try:
-            await m.answer("Привет! Давай начнём. Выбери уровень:", reply_markup=level_keyboard())
+            await m.answer("Давай начнём! Выбери свою цель:", reply_markup=onboarding_goal_kb())
         except Exception:
-            logging.exception("Fallback /start reply also failed")
+            logging.exception("Fallback onboarding goal also failed")
+
+@dp.callback_query_handler(lambda c: c.data.startswith("onboard:goal:"))
+async def onboard_goal(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
+    goal = c.data.split(":")[2]
+    set_user_goal(c.from_user.id, goal)
+    await c.answer()
+    await c.message.edit_text(
+        "Спасибо!\n\n<b>Что для тебя наиболее интересно?</b>\n\nВыбери, что хочется попробовать:",
+        reply_markup=onboarding_interest_kb()
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith("onboard:interest:"))
+async def onboard_interest(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
+    interest = c.data.split(":")[2]
+    set_user_feeling(c.from_user.id, interest)  # сохраняем интерес в поле feeling
+    await c.answer()
+    await c.message.edit_text(
+        "Отлично!\n\n<b>Сколько минут в день ты готов уделять английскому?</b>\n\nМожно выбрать честно — даже 5 минут в день дают результат!",
+        reply_markup=onboarding_minutes_kb()
+    )
+
+@dp.callback_query_handler(lambda c: c.data.startswith("onboard:minutes:"))
+async def onboard_minutes(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
+    minutes = c.data.split(":")[2]
+    set_user_daily_minutes(c.from_user.id, minutes if minutes != "unknown" else None)
+    await c.answer()
+    await c.message.edit_text(
+        "Спасибо! Теперь выбери свой уровень английского:", reply_markup=level_keyboard()
+    )
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("level:"))
@@ -1080,20 +1162,7 @@ async def cmd_topics(m: types.Message):
 @dp.message_handler(commands=["stats"])
 async def cmd_stats(m: types.Message):
     save_msg(m.from_user.id, "user", "/stats")
-    """Return basic usage statistics from the SQLite database.
-
-    Queries performed:
-    - total registered users
-    - users with a saved level
-    - active unique users in last 7 and 30 days (based on messages table)
-    - total messages stored
-    - users who used or selected news-related options (approximate)
-
-    Note: accuracy depends on what's saved to `users` and `messages` tables. If you
-    want more precise metrics (e.g. per-command tracking or Prometheus), we can add
-    explicit instrumentation.
-    """
-    # Optional admin restriction via ADMIN_ID environment variable (comma-separated ids)
+    # Return basic usage statistics: total users, users with level, activity windows, messages, news-engaged users.
     admin_env = os.getenv("ADMIN_ID")
     if admin_env:
         try:
@@ -1121,6 +1190,47 @@ async def cmd_stats(m: types.Message):
             "SELECT COUNT(*) FROM users WHERE (topics IS NOT NULL AND topics != '') OR mode='news'"
         ).fetchone()[0]
 
+    resp = (
+        f"📊 Статистика\n"
+        f"Всего зарегистрированных пользователей: {total_users}\n"
+        f"Пользователей с уровнем: {users_with_level}\n"
+        f"Активных за 7 дней: {active_7}\n"
+        f"Активных за 30 дней: {active_30}\n"
+        f"Всего сообщений в БД: {total_messages}\n"
+        f"Пользователей, заинтересовавшихся новостями (approx): {news_users}\n\n"
+        "Примечание: это приближённые метрики, основанные на таблицах users/messages."
+    )
+    await m.answer(resp)
+
+
+@dp.message_handler(commands=["stats"])
+async def cmd_stats(m: types.Message):
+    save_msg(m.from_user.id, "user", "/stats")
+    admin_env = os.getenv("ADMIN_ID")
+    if admin_env:
+        try:
+            admins = {int(x.strip()) for x in admin_env.split(",") if x.strip()}
+        except Exception:
+            admins = set()
+        if m.from_user.id not in admins:
+            await m.answer("Доступ к статистике ограничен.")
+            return
+    with closing(db()) as conn:
+        c = conn.cursor()
+        total_users = c.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        users_with_level = c.execute(
+            "SELECT COUNT(*) FROM users WHERE level IS NOT NULL AND level != ''"
+        ).fetchone()[0]
+        total_messages = c.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+        active_7 = c.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM messages WHERE datetime(created_at) >= datetime('now','-7 days')"
+        ).fetchone()[0]
+        active_30 = c.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM messages WHERE datetime(created_at) >= datetime('now','-30 days')"
+        ).fetchone()[0]
+        news_users = c.execute(
+            "SELECT COUNT(*) FROM users WHERE (topics IS NOT NULL AND topics != '') OR mode='news'"
+        ).fetchone()[0]
     resp = (
         f"📊 Статистика\n"
         f"Всего зарегистрированных пользователей: {total_users}\n"
@@ -1177,7 +1287,7 @@ async def cmd_help(m: types.Message):
 @dp.message_handler(commands=["settz"])
 async def cmd_settz(m: types.Message):
     save_msg(m.from_user.id, "user", m.text)
-    """Set user timezone. Usage: /settz Europe/Moscow"""
+    # Set user timezone. Usage: /settz Europe/Moscow
     parts = (m.text or "").split()
     if len(parts) < 2:
         await m.answer("Usage: /settz Europe/Moscow (use TZ database name)")
