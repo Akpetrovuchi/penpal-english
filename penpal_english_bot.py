@@ -451,36 +451,6 @@ def get_all_users_for_daily():
     return [dict(r) for r in rows]
 
 
-async def daily_sender_loop():
-    """Background task: every minute check users and send message at 12:00 local time if not sent today."""
-    while True:
-        try:
-            users = get_all_users_for_daily()
-            for u in users:
-                # send if last_interaction was more than 24 hours ago
-                last_inter = u.get("last_interaction")
-                try:
-                    if last_inter:
-                        last_dt = datetime.fromisoformat(last_inter)
-                        if (datetime.utcnow() - last_dt).total_seconds() >= 24 * 3600:
-                            last_sent = u.get("last_daily_sent")
-                            if last_sent == date.today().isoformat():
-                                continue
-                            # send message: greet and offer news flow
-                            try:
-                                await bot.send_message(u["id"], "👋 Hi! I have a fresh news for you today — shall we discuss it?", reply_markup=mode_keyboard())
-                                # update last_daily_sent
-                                with closing(db()) as conn:
-                                    c = conn.cursor()
-                                    c.execute("UPDATE users SET last_daily_sent=%s WHERE id=%s", (date.today().isoformat(), u["id"]))
-                                    conn.commit()
-                            except Exception:
-                                logging.exception("Failed to send daily message to user %s", u.get("id"))
-                except Exception:
-                    logging.exception("Error while checking last_interaction for user %s", u.get("id"))
-        except Exception:
-            logging.exception("daily_sender_loop error")
-        await asyncio.sleep(60)
 
 
 def save_msg(user_id, role, content):
@@ -1312,8 +1282,5 @@ if __name__ == "__main__":
     init_db()
     # start background daily sender task
     loop = asyncio.get_event_loop()
-    try:
-        loop.create_task(daily_sender_loop())
-    except Exception:
-        logging.exception("Failed to start daily sender loop")
+    # Removed daily_sender_loop: now handled by Heroku Scheduler
     executor.start_polling(dp, skip_updates=True)
