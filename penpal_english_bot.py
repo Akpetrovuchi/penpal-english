@@ -1158,10 +1158,17 @@ async def news_next(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "menu:main")
 async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
-    await c.message.edit_text(
-        "Меню активности — выбери, что хочешь сделать:",
-        reply_markup=mode_keyboard()
-    )
+    try:
+        await c.message.edit_text(
+            "Меню активности — выбери, что хочешь сделать:",
+            reply_markup=mode_keyboard()
+        )
+    except Exception:
+        # Если сообщение нельзя отредактировать, отправляем новое
+        await c.message.answer(
+            "Меню активности — выбери, что хочешь сделать:",
+            reply_markup=mode_keyboard()
+        )
 
 
 @dp.message_handler(commands=["topics"])
