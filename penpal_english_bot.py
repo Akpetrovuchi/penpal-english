@@ -1,3 +1,4 @@
+from datetime import date
 # penpal_english_bot.py
 import os
 import json
@@ -10,7 +11,7 @@ from contextlib import closing
 import requests
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
 from aiogram.utils import executor
 from dotenv import load_dotenv
 import openai
@@ -25,6 +26,11 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
+# Telegram Payments provider token (from @BotFather > Payments)
+PAYMENTS_PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN")
+# Subscription price configuration
+SUBSCRIPTION_PRICE = int(os.getenv("SUBSCRIPTION_PRICE", "299"))  # currency units
+SUBSCRIPTION_CURRENCY = os.getenv("SUBSCRIPTION_CURRENCY", "RUB")
 # GNews API key: prefer env var, fall back to user-provided key
 GNEWS_API_KEY = os.getenv("GNEWS_API_KEY")
 if not GNEWS_API_KEY:
@@ -356,37 +362,75 @@ def init_db():
             goal TEXT,
             feeling TEXT,
             daily_minutes INTEGER
+            , daily_articles INTEGER DEFAULT 0
+            , last_article_reset DATE
+            , subscription TEXT DEFAULT 'free'
         )
         """)
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS messages(
-            id SERIAL PRIMARY KEY,
-            user_id INTEGER,
-            role TEXT,
-            content TEXT,
-            created_at TEXT
-        )
-        """)
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS vocab(
-            user_id INTEGER,
-            phrase TEXT,
-            example TEXT,
-            added_at TEXT,
-            bin INTEGER DEFAULT 1
-        )
-        """)
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS news_cache(
-            id SERIAL PRIMARY KEY,
-            url TEXT,
-            title TEXT,
-            summary TEXT,
-            published_at TEXT,
-            questions TEXT
-        )
-        """)
+# Paywall helpers
+FREE_ARTICLE_LIMIT = 3
+
+def get_user_article_count(user_id):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT daily_articles, last_article_reset FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+    return row
+
+def increment_user_article_count(user_id):
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT last_article_reset FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        # row[0] is either None or a date/datetime object
+        if not row or not row[0] or row[0] != today:
+            c.execute("UPDATE users SET daily_articles=1, last_article_reset=%s WHERE id=%s", (today, user_id))
+        else:
+            c.execute("UPDATE users SET daily_articles=daily_articles+1 WHERE id=%s", (user_id,))
         conn.commit()
+
+def is_paid_user(user_id):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT subscription FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+    return row and row[0] == "paid"
+
+def set_user_subscription(user_id, status: str = "paid"):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET subscription=%s WHERE id=%s", (status, user_id))
+        conn.commit()
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS messages(
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER,
+        role TEXT,
+        content TEXT,
+        created_at TEXT
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS vocab(
+        user_id INTEGER,
+        phrase TEXT,
+        example TEXT,
+        added_at TEXT,
+        bin INTEGER DEFAULT 1
+    )
+    """)
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS news_cache(
+        id SERIAL PRIMARY KEY,
+        url TEXT,
+        title TEXT,
+        summary TEXT,
+        published_at TEXT,
+        questions TEXT
+    )
+    """)
+    conn.commit()
 
 
 def save_user(user_id, username):
@@ -1046,9 +1090,36 @@ async def finalize_word_selection(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:more"))
 async def more_news(c: types.CallbackQuery):
-    save_msg(c.from_user.id, "user", c.data)
+    user_id = c.from_user.id
+    save_msg(user_id, "user", c.data)
+    increment_user_article_count(user_id)
+    count_row = get_user_article_count(user_id)
+    today = date.today()
+    daily_articles = count_row[0] if count_row else 0
+    last_reset = count_row[1] if count_row else None
+    if last_reset != today:
+        daily_articles = 0
+
+    paid = is_paid_user(user_id)
+    try:
+        logging.info(f"Paywall check [more]: user={user_id} daily_articles={daily_articles} last_reset={last_reset} paid={paid} limit={FREE_ARTICLE_LIMIT}")
+    except Exception:
+        pass
+
+    if not paid and daily_articles > FREE_ARTICLE_LIMIT:
+        # Notify via alert and also send a message with a subscribe button
+        try:
+            await c.answer("Вы достигли лимита бесплатных статей на сегодня.", show_alert=True)
+        except Exception:
+            pass
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton("Оформить подписку ⭐️", callback_data="pay:subscribe")]]
+        )
+        await bot.send_message(user_id, "Оформите подписку для неограниченного доступа к статьям.", reply_markup=kb)
+        return
+
     await c.answer("Загружаю другую статью… ⏳")
-    await send_news(c.from_user.id)
+    await send_news(user_id)
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("ans:"))
@@ -1272,8 +1343,30 @@ async def cmd_level(m: types.Message):
 
 @dp.message_handler(commands=["news"])
 async def cmd_news(m: types.Message):
-    save_msg(m.from_user.id, "user", "/news")
-    await send_news(m.from_user.id)
+    user_id = m.from_user.id
+    save_msg(user_id, "user", "/news")
+    increment_user_article_count(user_id)
+    count_row = get_user_article_count(user_id)
+    today = date.today()
+    daily_articles = count_row[0] if count_row else 0
+    last_reset = count_row[1] if count_row else None
+    if last_reset != today:
+        daily_articles = 0
+
+    paid = is_paid_user(user_id)
+    try:
+        logging.info(f"Paywall check [/news]: user={user_id} daily_articles={daily_articles} last_reset={last_reset} paid={paid} limit={FREE_ARTICLE_LIMIT}")
+    except Exception:
+        pass
+
+    if not paid and daily_articles > FREE_ARTICLE_LIMIT:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton("Оформить подписку ⭐️", callback_data="pay:subscribe")]]
+        )
+        await m.answer("Вы достигли лимита бесплатных статей на сегодня.", reply_markup=kb)
+        return
+
+    await send_news(user_id)
 
 
 @dp.message_handler(commands=["review"])
@@ -1310,6 +1403,100 @@ async def cmd_menu(m: types.Message):
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
     )
+
+
+@dp.message_handler(commands=["subscribe", "premium"])
+async def cmd_subscribe(m: types.Message):
+    save_msg(m.from_user.id, "user", "/subscribe")
+    if not PAYMENTS_PROVIDER_TOKEN:
+        await m.answer("Платежи временно недоступны. Свяжитесь с поддержкой или попробуйте позже.")
+        return
+    # Build prices in minor units (kopeks/cents)
+    try:
+        amount_minor = SUBSCRIPTION_PRICE * 100
+    except Exception:
+        amount_minor = 29900
+    prices = [LabeledPrice(label="Подписка на месяц", amount=amount_minor)]
+    title = "Подписка PenPal English"
+    description = "Неограниченный доступ к статьям и тренировкам на месяц."
+    payload = "subscription-month-1"
+    start_parameter = "subscribe"
+    try:
+        await bot.send_invoice(
+            m.chat.id,
+            title=title,
+            description=description,
+            provider_token=PAYMENTS_PROVIDER_TOKEN,
+            currency=SUBSCRIPTION_CURRENCY,
+            prices=prices,
+            start_parameter=start_parameter,
+            payload=payload,
+            need_name=False,
+            need_email=False,
+            is_flexible=False,
+        )
+    except Exception:
+        logging.exception("Failed to send invoice")
+        await m.answer("Не удалось сформировать счёт. Попробуйте позже.")
+
+
+@dp.callback_query_handler(lambda c: c.data == "pay:subscribe")
+async def pay_subscribe_cb(c: types.CallbackQuery):
+    save_msg(c.from_user.id, "user", c.data)
+    if not PAYMENTS_PROVIDER_TOKEN:
+        await c.answer("Платежи недоступны", show_alert=True)
+        return
+    # Reuse /subscribe flow
+    try:
+        amount_minor = SUBSCRIPTION_PRICE * 100
+    except Exception:
+        amount_minor = 29900
+    prices = [LabeledPrice(label="Подписка на месяц", amount=amount_minor)]
+    title = "Подписка PenPal English"
+    description = "Неограниченный доступ к статьям и тренировкам на месяц."
+    payload = "subscription-month-1"
+    start_parameter = "subscribe"
+    try:
+        await bot.send_invoice(
+            c.from_user.id,
+            title=title,
+            description=description,
+            provider_token=PAYMENTS_PROVIDER_TOKEN,
+            currency=SUBSCRIPTION_CURRENCY,
+            prices=prices,
+            start_parameter=start_parameter,
+            payload=payload,
+            need_name=False,
+            need_email=False,
+            is_flexible=False,
+        )
+        await c.answer()
+    except Exception:
+        logging.exception("Failed to send invoice from callback")
+        await c.answer("Не удалось сформировать счёт", show_alert=True)
+
+
+@dp.pre_checkout_query_handler(lambda q: True)
+async def process_pre_checkout_q(pre_checkout_query: types.PreCheckoutQuery):
+    try:
+        await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
+    except Exception:
+        logging.exception("Failed to answer pre-checkout")
+
+
+@dp.message_handler(content_types=types.ContentTypes.SUCCESSFUL_PAYMENT)
+async def successful_payment(m: types.Message):
+    try:
+        sp = m.successful_payment
+        logging.info(f"Payment success: user={m.from_user.id} total={sp.total_amount} {sp.currency} payload={sp.invoice_payload}")
+    except Exception:
+        logging.exception("Unable to log successful payment")
+    # Mark user as paid
+    try:
+        set_user_subscription(m.from_user.id, "paid")
+    except Exception:
+        logging.exception("Failed to set user subscription to paid")
+    await m.answer("Спасибо за оплату! Подписка активирована — теперь доступ к статьям без ограничений. ✨")
 
 
 @dp.message_handler(commands=["settz"])
