@@ -365,6 +365,8 @@ def init_db():
             , daily_articles INTEGER DEFAULT 0
             , last_article_reset DATE
             , subscription TEXT DEFAULT 'free'
+            , paywall_shown INTEGER DEFAULT 0
+            , subscribe_click INTEGER DEFAULT 0
         )
         """)
 # Paywall helpers
@@ -376,6 +378,12 @@ def get_user_article_count(user_id):
         c.execute("SELECT daily_articles, last_article_reset FROM users WHERE id=%s", (user_id,))
         row = c.fetchone()
     return row
+
+def increment_user_counter(user_id, field):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute(f"UPDATE users SET {field} = COALESCE({field},0) + 1 WHERE id=%s", (user_id,))
+        conn.commit()
 
 def increment_user_article_count(user_id):
     today = date.today()
@@ -1107,7 +1115,8 @@ async def more_news(c: types.CallbackQuery):
         pass
 
     if not paid and daily_articles > FREE_ARTICLE_LIMIT:
-        # Notify via alert and also send a message with a subscribe button
+        # Increment paywall_shown counter
+        increment_user_counter(user_id, "paywall_shown")
         try:
             await c.answer("Вы достигли лимита бесплатных статей на сегодня.", show_alert=True)
         except Exception:
@@ -1360,6 +1369,7 @@ async def cmd_news(m: types.Message):
         pass
 
     if not paid and daily_articles > FREE_ARTICLE_LIMIT:
+        increment_user_counter(user_id, "paywall_shown")
         kb = InlineKeyboardMarkup(
             inline_keyboard=[[InlineKeyboardButton("Оформить подписку ⭐️", callback_data="pay:subscribe")]]
         )
@@ -1443,6 +1453,7 @@ async def cmd_subscribe(m: types.Message):
 @dp.callback_query_handler(lambda c: c.data == "pay:subscribe")
 async def pay_subscribe_cb(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
+    increment_user_counter(c.from_user.id, "subscribe_click")
     if not PAYMENTS_PROVIDER_TOKEN:
         await c.answer("Платежи недоступны", show_alert=True)
         return
