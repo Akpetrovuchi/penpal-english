@@ -1305,10 +1305,10 @@ async def news_done(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:next:"))
 async def news_next(c: types.CallbackQuery):
-    log_event(c.from_user.id, "news_question_answered", {"cache_id": int(parts[2]), "index": int(parts[3])})
-    save_msg(c.from_user.id, "user", c.data)
     # callback format: news:next:<cache_id>:<index>
     parts = c.data.split(":")
+    log_event(c.from_user.id, "news_question_answered", {"cache_id": int(parts[2]), "index": int(parts[3])})
+    save_msg(c.from_user.id, "user", c.data)
     cache_id = int(parts[2])
     idx = int(parts[3])
     with closing(db()) as conn:
