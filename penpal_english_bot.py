@@ -1,3 +1,46 @@
+import uuid
+# --- Unified Event Logging (new structure) ---
+from threading import Lock
+USER_EVENT_SESSIONS = {}
+USER_EVENT_SESSIONS_LOCK = Lock()
+
+def get_event_session_id(user_id):
+    """Get or create a session_id for a user based on 30min inactivity rule."""
+    now = datetime.utcnow()
+    with USER_EVENT_SESSIONS_LOCK:
+        sess = USER_EVENT_SESSIONS.get(user_id, {})
+        last_time = sess.get('last_event_time')
+        session_id = sess.get('session_id')
+        if not session_id or not last_time or (now - last_time).total_seconds() > 1800:
+            session_id = uuid.uuid4()
+        USER_EVENT_SESSIONS[user_id] = {'session_id': session_id, 'last_event_time': now}
+        return session_id
+
+def log_event(user_id, event_type, metadata=None, session_id=None):
+    """
+    Log an event to the events table (new structure).
+    - user_id: int
+    - event_type: str
+    - metadata: dict (JSONB)
+    - session_id: UUID (optional, auto-managed if not provided)
+    """
+    if metadata is None:
+        metadata = {}
+    if session_id is None:
+        session_id = get_event_session_id(user_id)
+    event_id = uuid.uuid4()
+    # Always serialize metadata to JSON for psycopg2
+    metadata_json = json.dumps(metadata)
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute(
+            """
+            INSERT INTO events (id, user_id, event_type, metadata, session_id, created_at)
+            VALUES (%s, %s, %s, %s::jsonb, %s, now())
+            """,
+            (str(event_id), user_id, event_type, metadata_json, str(session_id))
+        )
+        conn.commit()
 from datetime import date
 # penpal_english_bot.py
 import os
@@ -400,15 +443,6 @@ def get_session_id(user_id):
         sess['last_event_time'] = now
         return sess['session_id']
 
-def log_event(user_id, session_id, event_name, event_value=None):
-    """Log an event to the events table."""
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute(
-            "INSERT INTO events(user_id, session_id, event_name, event_value) VALUES(%s, %s, %s, %s)",
-            (user_id, session_id, event_name, json.dumps(event_value) if event_value else None)
-        )
-        conn.commit()
 
 # Daily sent helpers
 def increment_daily_sent(user_id):
@@ -915,8 +949,7 @@ async def send_news(user_id):
 async def start(m: types.Message):
     save_user(m.from_user.id, m.from_user.username or "")
     save_msg(m.from_user.id, "user", "/start")
-    session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "onboarding_started", {})
+    log_event(m.from_user.id, "onboarding_started", {})
     # Reset topics and onboarding fields for this user
     try:
         set_user_topics(m.from_user.id, [])
@@ -926,7 +959,6 @@ async def start(m: types.Message):
         set_user_daily_minutes(m.from_user.id, None)
     except Exception:
         logging.exception("Failed to reset user topics/onboarding on /start")
-        log_event(m.from_user.id, session_id, "error", {"error": "Failed to reset onboarding fields"})
     try:
         await m.answer(
             "Привет! Я <b>Макс</b> 👋\n\nПеред тем как выбрать уровень, расскажи о себе:\n\n<b>Какая твоя главная цель в изучении английского?</b>",
@@ -934,7 +966,6 @@ async def start(m: types.Message):
         )
     except Exception:
         logging.exception("Failed to send onboarding goal; falling back to safe message")
-        log_event(m.from_user.id, session_id, "error", {"error": "Failed to send onboarding goal"})
         try:
             await m.answer("Давай начнём! Выбери свою цель:", reply_markup=onboarding_goal_kb())
         except Exception:
@@ -943,8 +974,7 @@ async def start(m: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:goal:"))
 async def onboard_goal(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
-    session_id = get_session_id(c.from_user.id)
-    log_event(c.from_user.id, session_id, "user_message", {"text": c.data})
+    log_event(c.from_user.id, "onboarding_goal_selected", {"goal": c.data.split(":")[2]})
     goal = c.data.split(":")[2]
     set_user_goal(c.from_user.id, goal)
     await c.answer()
@@ -956,10 +986,9 @@ async def onboard_goal(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:interest:"))
 async def onboard_interest(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
-    session_id = get_session_id(c.from_user.id)
-    log_event(c.from_user.id, session_id, "user_message", {"text": c.data})
+    log_event(c.from_user.id, "onboarding_topic_selected", {"interest": c.data.split(":")[2]})
     interest = c.data.split(":")[2]
-    set_user_feeling(c.from_user.id, interest)  # сохраняем интерес в поле feeling
+    set_user_feeling(c.from_user.id, interest)
     await c.answer()
     await c.message.edit_text(
         "Отлично!\n\n<b>Сколько минут в день ты готов уделять английскому?</b>\n\nМожно выбрать честно — даже 5 минут в день дают результат!",
@@ -969,12 +998,12 @@ async def onboard_interest(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:minutes:"))
 async def onboard_minutes(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
-    session_id = get_session_id(c.from_user.id)
-    log_event(c.from_user.id, session_id, "user_message", {"text": c.data})
+    # User selected how many minutes per day they can study
+    log_event(c.from_user.id, "onboarding_minutes_selected", {"minutes": c.data.split(":")[2]})
     minutes = c.data.split(":")[2]
     set_user_daily_minutes(c.from_user.id, minutes if minutes != "unknown" else None)
     # Onboarding completed
-    log_event(c.from_user.id, session_id, "onboarding_completed", {"goal": get_user(c.from_user.id).get("goal"), "feeling": get_user(c.from_user.id).get("feeling"), "minutes": minutes})
+    log_event(c.from_user.id, "onboarding_completed", {})
     await c.answer()
     await c.message.edit_text(
         "Спасибо! Теперь выбери свой уровень английского:", reply_markup=level_keyboard()
@@ -983,6 +1012,7 @@ async def onboard_minutes(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("level:"))
 async def choose_level(c: types.CallbackQuery):
+    log_event(c.from_user.id, "onboarding_level_selected", {"level": c.data.split(":")[1]})
     save_msg(c.from_user.id, "user", c.data)
     level = c.data.split(":")[1]
     user_id = c.from_user.id
@@ -1009,6 +1039,7 @@ async def choose_level(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("mode:"))
 async def choose_mode(c: types.CallbackQuery):
+    log_event(c.from_user.id, "mode_selected", {"mode": c.data.split(":")[1]})
     save_msg(c.from_user.id, "user", c.data)
     user_id = c.from_user.id
     mode = c.data.split(":")[1]
@@ -1034,6 +1065,7 @@ async def choose_mode(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("chat:topic:"))
 async def choose_chat_topic(c: types.CallbackQuery):
+    log_event(c.from_user.id, "topic_session_started", {"topic": c.data.split(":")[2]})
     save_msg(c.from_user.id, "user", c.data)
     user_id = c.from_user.id
     parts = c.data.split(":")
@@ -1163,6 +1195,7 @@ async def finalize_word_selection(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("news:more"))
 async def more_news(c: types.CallbackQuery):
     user_id = c.from_user.id
+    log_event(user_id, "news_requested", {})
     save_msg(user_id, "user", c.data)
     increment_user_article_count(user_id)
     count_row = get_user_article_count(user_id)
@@ -1209,8 +1242,10 @@ async def answer_hint(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:translate:"))
 async def news_translate(c: types.CallbackQuery):
-    save_msg(c.from_user.id, "user", c.data)
     parts = c.data.split(":")
+    # User requested translation of a news article
+    log_event(c.from_user.id, "translation_requested", {"cache_id": int(parts[2])})
+    save_msg(c.from_user.id, "user", c.data)
     cache_id = int(parts[2])
     with closing(db()) as conn:
         c_db = conn.cursor()
@@ -1236,8 +1271,9 @@ async def news_translate(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:done:"))
 async def news_done(c: types.CallbackQuery):
-    save_msg(c.from_user.id, "user", c.data)
     parts = c.data.split(":")
+    log_event(c.from_user.id, "news_completed", {"cache_id": int(parts[2])})
+    save_msg(c.from_user.id, "user", c.data)
     cache_id = int(parts[2])
     with closing(db()) as conn:
         c_db = conn.cursor()
@@ -1269,6 +1305,7 @@ async def news_done(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data.startswith("news:next:"))
 async def news_next(c: types.CallbackQuery):
+    log_event(c.from_user.id, "news_question_answered", {"cache_id": int(parts[2]), "index": int(parts[3])})
     save_msg(c.from_user.id, "user", c.data)
     # callback format: news:next:<cache_id>:<index>
     parts = c.data.split(":")
@@ -1319,7 +1356,7 @@ async def menu_main_callback(c: types.CallbackQuery):
 async def cmd_topics(m: types.Message):
     save_msg(m.from_user.id, "user", "/topics")
     session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "command_used", {"command": "/topics"})
+    log_event(m.from_user.id, "command_used", {"command": "/topics"})
     user = get_user(m.from_user.id)
     current = (user.get("topics") or "").split(",") if user and user.get("topics") else []
     await m.answer("Update your interests 🌟:", reply_markup=topic_keyboard(current))
@@ -1329,7 +1366,7 @@ async def cmd_topics(m: types.Message):
 async def cmd_stats(m: types.Message):
     save_msg(m.from_user.id, "user", "/stats")
     session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "command_used", {"command": "/stats"})
+    log_event(m.from_user.id, "command_used", {"command": "/stats"})
     # Return basic usage statistics: total users, users with level, activity windows, messages, news-engaged users.
     admin_env = os.getenv("ADMIN_ID")
     if admin_env:
@@ -1416,16 +1453,17 @@ async def cmd_stats(m: types.Message):
 async def cmd_level(m: types.Message):
     save_msg(m.from_user.id, "user", "/level")
     session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "command_used", {"command": "/level"})
+    log_event(m.from_user.id, "command_used", {"command": "/level"})
     await m.answer("Pick your level 🎯:", reply_markup=level_keyboard())
 
 
 @dp.message_handler(commands=["news"])
 async def cmd_news(m: types.Message):
+    log_event(m.from_user.id, "news_requested", {})
     user_id = m.from_user.id
     save_msg(user_id, "user", "/news")
     session_id = get_session_id(user_id)
-    log_event(user_id, session_id, "command_used", {"command": "/news"})
+    log_event(user_id, "command_used", {"command": "/news"})
     increment_user_article_count(user_id)
     count_row = get_user_article_count(user_id)
     today = date.today()
@@ -1475,7 +1513,7 @@ async def cmd_review(m: types.Message):
 async def cmd_help(m: types.Message):
     save_msg(m.from_user.id, "user", "/help")
     session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "command_used", {"command": "/help"})
+    log_event(m.from_user.id, "command_used", {"command": "/help"})
     await m.answer(
         "Try /news for a fresh topic 📰, /topics to change interests, /level to adjust difficulty, /review for phrases. Or just chat with me in English! 😊"
     )
@@ -1484,7 +1522,7 @@ async def cmd_help(m: types.Message):
 async def cmd_menu(m: types.Message):
     save_msg(m.from_user.id, "user", "/menu")
     session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "command_used", {"command": "/menu"})
+    log_event(m.from_user.id, "command_used", {"command": "/menu"})
     await m.answer(
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
@@ -1611,6 +1649,7 @@ async def cmd_settz(m: types.Message):
 
 @dp.message_handler()
 async def chat(m: types.Message):
+    log_event(m.from_user.id, "user_message", {"text": m.text})
     user = get_user(m.from_user.id)
     if not user or not user.get("level"):
         save_user(m.from_user.id, m.from_user.username or "")
@@ -1623,6 +1662,13 @@ async def chat(m: types.Message):
         text = (m.text or "").lower()
         # immediate exit
         if "bye" in text or "bye 👋" in text:
+            # If user completed at least one task, consider topic completed as well
+            if session.get("completed_count", 0) > 0:
+                log_event(
+                    m.from_user.id,
+                    "topic_completed",
+                    {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
+                )
             USER_CHAT_SESSIONS.pop(m.from_user.id, None)
             await m.answer("Диалог завершён. Возвращаю тебя в меню активности.", reply_markup=mode_keyboard())
             return
@@ -1641,15 +1687,26 @@ async def chat(m: types.Message):
                 except Exception:
                     logging.exception("Error while checking task completion")
 
-        # send feedback for completed tasks
+        # send feedback for completed tasks and log events
         if newly_completed:
             for item in newly_completed:
                 t = item.get("task")
                 expl = item.get("explanation") or ""
+                log_event(
+                    m.from_user.id,
+                    "task_completed",
+                    {"topic": session.get("topic"), "task_id": t.get("id"), "task_text": t.get("text")},
+                )
                 await m.answer(f"Отлично — задание выполнено: {t['text']}\n{expl}")
 
         # check for completion criteria
         if session["completed_count"] >= 2:
+            # topic completed (required tasks done)
+            log_event(
+                m.from_user.id,
+                "topic_completed",
+                {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
+            )
             USER_CHAT_SESSIONS.pop(m.from_user.id, None)
             await m.answer(
                 "Поздравляю — ты выполнил(а) необходимые задания! Возвращаю тебя в меню активности.",
@@ -1658,6 +1715,13 @@ async def chat(m: types.Message):
             return
 
         if session["turns"] >= 20:
+            # If user completed at least one task before timeout, mark topic as completed
+            if session.get("completed_count", 0) > 0:
+                log_event(
+                    m.from_user.id,
+                    "topic_completed",
+                    {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
+                )
             USER_CHAT_SESSIONS.pop(m.from_user.id, None)
             await m.answer(
                 "Диалог окончен (лимит реплик достигнут). Возвращаю тебя в меню активности.",
@@ -1693,10 +1757,11 @@ async def chat(m: types.Message):
     # Build short context (last ~6 turns)
     with closing(db()) as conn:
         c = conn.cursor()
-        rows = c.execute(
-            "SELECT role, content FROM messages WHERE user_id=? ORDER BY id DESC LIMIT 6",
+        c.execute(
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 6",
             (m.from_user.id,),
-        ).fetchall()
+        )
+        rows = c.fetchall()
     history = [{"role": r, "content": ct} for (r, ct) in rows[::-1]]
     messages = (
         [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -1705,11 +1770,11 @@ async def chat(m: types.Message):
     )
     save_msg(m.from_user.id, "user", m.text)
     session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "user_message", {"text": m.text})
+    log_event(m.from_user.id, "user_message", {"text": m.text}, session_id=session_id)
     reply = await gpt_chat(messages)
     # No longer mining 'Useful:' phrases. Corrections are handled by the assistant per SYSTEM_PROMPT.
     save_msg(m.from_user.id, "assistant", reply)
-    log_event(m.from_user.id, session_id, "assistant_message", {"text": reply})
+    log_event(m.from_user.id, "assistant_message", {"text": reply}, session_id=session_id)
     await m.answer(reply)
 
 
