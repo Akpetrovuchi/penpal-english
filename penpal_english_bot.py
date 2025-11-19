@@ -361,15 +361,67 @@ def init_db():
             last_interaction TEXT,
             goal TEXT,
             feeling TEXT,
-            daily_minutes INTEGER
-            , daily_articles INTEGER DEFAULT 0
-            , last_article_reset DATE
-            , subscription TEXT DEFAULT 'free'
-            , paywall_shown INTEGER DEFAULT 0
-            , subscribe_click INTEGER DEFAULT 0
+            daily_minutes INTEGER,
+            daily_articles INTEGER DEFAULT 0,
+            last_article_reset DATE,
+            subscription TEXT DEFAULT 'free',
+            paywall_shown INTEGER DEFAULT 0,
+            subscribe_click INTEGER DEFAULT 0,
+            daily_sent INTEGER DEFAULT 0
         )
         """)
+        # Events table for analytics
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS events(
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER,
+            session_id UUID,
+            event_name TEXT,
+            event_value JSONB,
+            created_at TIMESTAMPTZ DEFAULT now()
+        )
+        """)
+import uuid
+import threading
+from collections import defaultdict
+from datetime import timedelta
 # Paywall helpers
+# In-memory session store: user_id -> (session_id, last_event_time)
+USER_SESSIONS = defaultdict(lambda: {'session_id': None, 'last_event_time': None})
+USER_SESSIONS_LOCK = threading.Lock()
+
+def get_session_id(user_id):
+    """Get or create a session_id for a user based on 30min inactivity rule."""
+    now = datetime.utcnow()
+    with USER_SESSIONS_LOCK:
+        sess = USER_SESSIONS[user_id]
+        if not sess['session_id'] or not sess['last_event_time'] or (now - sess['last_event_time']) > timedelta(minutes=30):
+            sess['session_id'] = uuid.uuid4()
+        sess['last_event_time'] = now
+        return sess['session_id']
+
+def log_event(user_id, session_id, event_name, event_value=None):
+    """Log an event to the events table."""
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute(
+            "INSERT INTO events(user_id, session_id, event_name, event_value) VALUES(%s, %s, %s, %s)",
+            (user_id, session_id, event_name, json.dumps(event_value) if event_value else None)
+        )
+        conn.commit()
+
+# Daily sent helpers
+def increment_daily_sent(user_id):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET daily_sent = COALESCE(daily_sent,0) + 1 WHERE id=%s", (user_id,))
+        conn.commit()
+
+def reset_daily_sent(user_id):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET daily_sent = 0 WHERE id=%s", (user_id,))
+        conn.commit()
 FREE_ARTICLE_LIMIT = 3
 
 def get_user_article_count(user_id):
@@ -861,8 +913,10 @@ async def send_news(user_id):
 
 @dp.message_handler(commands=["start"])
 async def start(m: types.Message):
-    save_msg(m.from_user.id, "user", "/start")
     save_user(m.from_user.id, m.from_user.username or "")
+    save_msg(m.from_user.id, "user", "/start")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "onboarding_started", {})
     # Reset topics and onboarding fields for this user
     try:
         set_user_topics(m.from_user.id, [])
@@ -872,6 +926,7 @@ async def start(m: types.Message):
         set_user_daily_minutes(m.from_user.id, None)
     except Exception:
         logging.exception("Failed to reset user topics/onboarding on /start")
+        log_event(m.from_user.id, session_id, "error", {"error": "Failed to reset onboarding fields"})
     try:
         await m.answer(
             "Привет! Я <b>Макс</b> 👋\n\nПеред тем как выбрать уровень, расскажи о себе:\n\n<b>Какая твоя главная цель в изучении английского?</b>",
@@ -879,6 +934,7 @@ async def start(m: types.Message):
         )
     except Exception:
         logging.exception("Failed to send onboarding goal; falling back to safe message")
+        log_event(m.from_user.id, session_id, "error", {"error": "Failed to send onboarding goal"})
         try:
             await m.answer("Давай начнём! Выбери свою цель:", reply_markup=onboarding_goal_kb())
         except Exception:
@@ -887,6 +943,8 @@ async def start(m: types.Message):
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:goal:"))
 async def onboard_goal(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
+    session_id = get_session_id(c.from_user.id)
+    log_event(c.from_user.id, session_id, "user_message", {"text": c.data})
     goal = c.data.split(":")[2]
     set_user_goal(c.from_user.id, goal)
     await c.answer()
@@ -898,6 +956,8 @@ async def onboard_goal(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:interest:"))
 async def onboard_interest(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
+    session_id = get_session_id(c.from_user.id)
+    log_event(c.from_user.id, session_id, "user_message", {"text": c.data})
     interest = c.data.split(":")[2]
     set_user_feeling(c.from_user.id, interest)  # сохраняем интерес в поле feeling
     await c.answer()
@@ -909,8 +969,12 @@ async def onboard_interest(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:minutes:"))
 async def onboard_minutes(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
+    session_id = get_session_id(c.from_user.id)
+    log_event(c.from_user.id, session_id, "user_message", {"text": c.data})
     minutes = c.data.split(":")[2]
     set_user_daily_minutes(c.from_user.id, minutes if minutes != "unknown" else None)
+    # Onboarding completed
+    log_event(c.from_user.id, session_id, "onboarding_completed", {"goal": get_user(c.from_user.id).get("goal"), "feeling": get_user(c.from_user.id).get("feeling"), "minutes": minutes})
     await c.answer()
     await c.message.edit_text(
         "Спасибо! Теперь выбери свой уровень английского:", reply_markup=level_keyboard()
@@ -1254,6 +1318,8 @@ async def menu_main_callback(c: types.CallbackQuery):
 @dp.message_handler(commands=["topics"])
 async def cmd_topics(m: types.Message):
     save_msg(m.from_user.id, "user", "/topics")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "command_used", {"command": "/topics"})
     user = get_user(m.from_user.id)
     current = (user.get("topics") or "").split(",") if user and user.get("topics") else []
     await m.answer("Update your interests 🌟:", reply_markup=topic_keyboard(current))
@@ -1262,6 +1328,8 @@ async def cmd_topics(m: types.Message):
 @dp.message_handler(commands=["stats"])
 async def cmd_stats(m: types.Message):
     save_msg(m.from_user.id, "user", "/stats")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "command_used", {"command": "/stats"})
     # Return basic usage statistics: total users, users with level, activity windows, messages, news-engaged users.
     admin_env = os.getenv("ADMIN_ID")
     if admin_env:
@@ -1347,6 +1415,8 @@ async def cmd_stats(m: types.Message):
 @dp.message_handler(commands=["level"])
 async def cmd_level(m: types.Message):
     save_msg(m.from_user.id, "user", "/level")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "command_used", {"command": "/level"})
     await m.answer("Pick your level 🎯:", reply_markup=level_keyboard())
 
 
@@ -1354,6 +1424,8 @@ async def cmd_level(m: types.Message):
 async def cmd_news(m: types.Message):
     user_id = m.from_user.id
     save_msg(user_id, "user", "/news")
+    session_id = get_session_id(user_id)
+    log_event(user_id, session_id, "command_used", {"command": "/news"})
     increment_user_article_count(user_id)
     count_row = get_user_article_count(user_id)
     today = date.today()
@@ -1402,6 +1474,8 @@ async def cmd_review(m: types.Message):
 @dp.message_handler(commands=["help"])
 async def cmd_help(m: types.Message):
     save_msg(m.from_user.id, "user", "/help")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "command_used", {"command": "/help"})
     await m.answer(
         "Try /news for a fresh topic 📰, /topics to change interests, /level to adjust difficulty, /review for phrases. Or just chat with me in English! 😊"
     )
@@ -1409,6 +1483,8 @@ async def cmd_help(m: types.Message):
 @dp.message_handler(commands=["menu"])
 async def cmd_menu(m: types.Message):
     save_msg(m.from_user.id, "user", "/menu")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "command_used", {"command": "/menu"})
     await m.answer(
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
@@ -1418,6 +1494,8 @@ async def cmd_menu(m: types.Message):
 @dp.message_handler(commands=["subscribe", "premium"])
 async def cmd_subscribe(m: types.Message):
     save_msg(m.from_user.id, "user", "/subscribe")
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "command_used", {"command": "/subscribe"})
     if not PAYMENTS_PROVIDER_TOKEN:
         await m.answer("Платежи временно недоступны. Свяжитесь с поддержкой или попробуйте позже.")
         return
@@ -1626,9 +1704,12 @@ async def chat(m: types.Message):
         + [{"role": "user", "content": m.text}]
     )
     save_msg(m.from_user.id, "user", m.text)
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, session_id, "user_message", {"text": m.text})
     reply = await gpt_chat(messages)
     # No longer mining 'Useful:' phrases. Corrections are handled by the assistant per SYSTEM_PROMPT.
     save_msg(m.from_user.id, "assistant", reply)
+    log_event(m.from_user.id, session_id, "assistant_message", {"text": reply})
     await m.answer(reply)
 
 
