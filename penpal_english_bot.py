@@ -947,6 +947,8 @@ async def send_news(user_id):
 
 @dp.message_handler(commands=["start"])
 async def start(m: types.Message):
+    # Any previous roleplay/chat topic session should be cleared on full restart
+    USER_CHAT_SESSIONS.pop(m.from_user.id, None)
     save_user(m.from_user.id, m.from_user.username or "")
     save_msg(m.from_user.id, "user", "/start")
     log_event(m.from_user.id, "onboarding_started", {})
@@ -1046,6 +1048,8 @@ async def choose_mode(c: types.CallbackQuery):
     if mode not in {"news", "chat"}:
         await c.answer("Неизвестный режим.", show_alert=True)
         return
+    # Switching between news/chat should drop any previous chat topic state
+    USER_CHAT_SESSIONS.pop(user_id, None)
     set_user_mode(user_id, mode)
     await c.answer()
     if mode == "news":
@@ -1120,6 +1124,8 @@ async def choose_chat_topic(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data.startswith("topic:"))
 async def choose_topics(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
+    # Selecting news topics means we are no longer in a roleplay topic session
+    USER_CHAT_SESSIONS.pop(c.from_user.id, None)
     user = get_user(c.from_user.id)
     if not user:
         await c.answer("Не удалось найти профиль. Попробуй /start.", show_alert=True)
@@ -1350,6 +1356,8 @@ async def menu_main_callback(c: types.CallbackQuery):
             "Меню активности — выбери, что хочешь сделать:",
             reply_markup=mode_keyboard()
         )
+    # Also clear active chat topic session when user returns to menu from callbacks
+    USER_CHAT_SESSIONS.pop(c.from_user.id, None)
 
 
 @dp.message_handler(commands=["topics"])
@@ -1459,6 +1467,8 @@ async def cmd_level(m: types.Message):
 
 @dp.message_handler(commands=["news"])
 async def cmd_news(m: types.Message):
+    # Explicit switch to news: clear any active chat topic session
+    USER_CHAT_SESSIONS.pop(m.from_user.id, None)
     log_event(m.from_user.id, "news_requested", {})
     user_id = m.from_user.id
     save_msg(user_id, "user", "/news")
@@ -1523,6 +1533,8 @@ async def cmd_menu(m: types.Message):
     save_msg(m.from_user.id, "user", "/menu")
     session_id = get_session_id(m.from_user.id)
     log_event(m.from_user.id, "command_used", {"command": "/menu"})
+    # From the main menu there should be no active chat topic session
+    USER_CHAT_SESSIONS.pop(m.from_user.id, None)
     await m.answer(
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
