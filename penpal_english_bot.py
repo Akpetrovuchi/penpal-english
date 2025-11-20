@@ -739,6 +739,19 @@ def topic_keyboard(selected=None):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def news_topics_reselect_keyboard():
+    """Keyboard entry point for changing news topics from commands.
+
+    This lets the user explicitly return to news topic selection instead of
+    being forced to reselect every time they click "Обсудить статью".
+    """
+    rows = [
+        [InlineKeyboardButton("Сменить темы новостей 📰", callback_data="news:topics")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def level_keyboard():
     levels = ["A2", "B1", "B2", "C1"]
     top_row = [InlineKeyboardButton(l, callback_data=f"level:{l}") for l in levels]
@@ -772,6 +785,14 @@ def mode_keyboard():
             [InlineKeyboardButton("Свободный разговор 💬", callback_data="mode:chat")],
         ]
     )
+
+
+def news_topics_keyboard(existing_topics=None):
+    """Keyboard for (re)selecting news topics.
+
+    existing_topics: optional list of topic codes already saved for the user.
+    """
+    return topic_keyboard(existing_topics or [])
 
 # Onboarding keyboards
 def onboarding_goal_kb():
@@ -1056,10 +1077,19 @@ async def choose_mode(c: types.CallbackQuery):
         user = get_user(user_id)
         existing = []
         if user and user.get("topics"):
-            existing = [t for t in user["topics"].split(",") if t]
-        await c.message.edit_text(
-            "Выбери темы, которые тебе нравятся:", reply_markup=topic_keyboard(existing)
-        )
+            existing = [t.strip() for t in (user.get("topics") or "").split(",") if t.strip()]
+
+        # If topics already chosen before, don't force selection every time;
+        # just bring a new article based on saved interests.
+        if existing:
+            await c.message.edit_text(
+                "Отлично! Я подберу статью по твоим темам. Вот новость 📰:",
+            )
+            await send_news(user_id)
+        else:
+            await c.message.edit_text(
+                "Выбери темы, которые тебе нравятся:", reply_markup=topic_keyboard(existing)
+            )
     else:
         # Present chat topic choices when user selects free chat
         await c.message.edit_text(
@@ -1141,7 +1171,10 @@ async def choose_topics(c: types.CallbackQuery):
         if not selected:
             await c.answer("Выбери хотя бы одну тему 🙂", show_alert=True)
             return
-        await c.message.edit_text("Отлично! Я принесу материал для обсуждения. Вот новость 📰:")
+        await c.message.edit_text(
+            "Отлично! Я принесу материал для обсуждения. Вот новость 📰:\n\n"
+            "Темы новостей всегда можно изменить командой /newstopics."
+        )
         await send_news(c.from_user.id)
         return
     if val in selected:
@@ -1150,6 +1183,49 @@ async def choose_topics(c: types.CallbackQuery):
         selected.append(val)
     set_user_topics(c.from_user.id, selected)
     await c.message.edit_reply_markup(reply_markup=topic_keyboard(selected))
+
+
+@dp.callback_query_handler(lambda c: c.data == "news:topics")
+async def reselect_news_topics(c: types.CallbackQuery):
+    """Explicit entry point to change saved news topics.
+
+    Opens the same topic selection keyboard used during onboarding when the
+    user first chose "Обсудить статью".
+    """
+    save_msg(c.from_user.id, "user", c.data)
+    user = get_user(c.from_user.id)
+    if not user:
+        await c.answer("Не удалось найти профиль. Попробуй /start.", show_alert=True)
+        return
+    # Ensure we're in news mode so that subsequent flows behave correctly
+    set_user_mode(c.from_user.id, "news")
+    existing = []
+    if user.get("topics"):
+        existing = [t.strip() for t in (user.get("topics") or "").split(",") if t.strip()]
+    await c.answer()
+    await c.message.edit_text(
+        "Выбери темы, которые тебе нравятся (эти темы всегда можно изменить командой /newstopics):",
+        reply_markup=topic_keyboard(existing),
+    )
+
+
+@dp.message_handler(commands=["newstopics"])
+async def cmd_newstopics(m: types.Message):
+    """Text command to (re)select news topics at any time."""
+    save_msg(m.from_user.id, "user", "/newstopics")
+    user = get_user(m.from_user.id)
+    if not user:
+        await m.answer("Не удалось найти профиль. Попробуй /start.")
+        return
+    # Переключаем режим на news и показываем текущий выбор тем (если есть)
+    set_user_mode(m.from_user.id, "news")
+    existing = []
+    if user.get("topics"):
+        existing = [t.strip() for t in (user.get("topics") or "").split(",") if t.strip()]
+    await m.answer(
+        "Выбери темы, которые тебе нравятся (эти темы всегда можно изменить командой /newstopics):",
+        reply_markup=topic_keyboard(existing),
+    )
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith("word:toggle:"))
@@ -1474,6 +1550,19 @@ async def cmd_news(m: types.Message):
     save_msg(user_id, "user", "/news")
     session_id = get_session_id(user_id)
     log_event(user_id, "command_used", {"command": "/news"})
+    # If user has never chosen news topics, send them to topic selection first
+    user = get_user(user_id)
+    existing = []
+    if user and user.get("topics"):
+        existing = [t.strip() for t in (user.get("topics") or "").split(",") if t.strip()]
+
+    if not existing:
+        await m.answer(
+            "Сначала выбери темы новостей, которые тебе интересны (их всегда можно изменить командой /newstopics):",
+            reply_markup=topic_keyboard(existing),
+        )
+        return
+
     increment_user_article_count(user_id)
     count_row = get_user_article_count(user_id)
     today = date.today()
@@ -1525,7 +1614,7 @@ async def cmd_help(m: types.Message):
     session_id = get_session_id(m.from_user.id)
     log_event(m.from_user.id, "command_used", {"command": "/help"})
     await m.answer(
-        "Try /news for a fresh topic 📰, /topics to change interests, /level to adjust difficulty, /review for phrases. Or just chat with me in English! 😊"
+        "Try /news for a fresh topic 📰, /topics to change interests, /newstopics to change news topics, /level to adjust difficulty, /review for phrases. Or just chat with me in English! 😊"
     )
 
 @dp.message_handler(commands=["menu"])
