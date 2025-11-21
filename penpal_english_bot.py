@@ -781,8 +781,8 @@ def render_word_selection_kb(user_id):
 def mode_keyboard():
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton("Обсудить статью 📰", callback_data="mode:news")],
-            [InlineKeyboardButton("Свободный разговор 💬", callback_data="mode:chat")],
+            [InlineKeyboardButton("Обсудить новость 📰", callback_data="mode:news")],
+            [InlineKeyboardButton("Разговорная практика 💬", callback_data="mode:chat")],
         ]
     )
 
@@ -935,7 +935,7 @@ async def send_news(user_id):
                     InlineKeyboardButton(
                         "Перевести 🔁", callback_data=f"news:translate:{cache_id}"
                     ),
-                    InlineKeyboardButton("Завершил(а) ✅", callback_data=f"news:done:{cache_id}"),
+                    InlineKeyboardButton("Прочитал(а) ✅", callback_data=f"news:done:{cache_id}"),
                 ],
                 [InlineKeyboardButton("Поменять статью 🔁", callback_data="news:more")],
                 [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
@@ -1014,8 +1014,8 @@ async def onboard_interest(c: types.CallbackQuery):
     set_user_feeling(c.from_user.id, interest)
     await c.answer()
     await c.message.edit_text(
-        "Отлично, я с радостью помогу тебе🙌\nКакой формат тебе сейчас больше всего подходит?",
-        reply_markup=onboarding_interest_kb()
+        "Сколько времени в день ты готов уделять английскому? ⏳",
+        reply_markup=onboarding_minutes_kb()
     )
 
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:minutes:"))
@@ -1055,7 +1055,7 @@ async def choose_level(c: types.CallbackQuery):
     set_user_mode(user_id, None)
     await c.answer()
     await c.message.edit_text(
-        f"Отлично! Уровень установлен: <b>{level}</b> 🎯\n\nЧто ты хочешь сделать дальше?",
+        f"Отлично! Уровень установлен: <b>{level}</b> 🎯\n\nС чего начнем?",
         reply_markup=mode_keyboard(),
     )
 
@@ -1269,7 +1269,7 @@ async def finalize_word_selection(c: types.CallbackQuery):
     set_user_mode(uid, None)
     await c.answer()
     await c.message.edit_text(
-        f"Готово — по твоему выбору ({count} слов) уровень определён как <b>{level}</b>.\n\nЧто хочешь сделать дальше?",
+        f"Готово — по твоему выбору ({count} слов) уровень определён как <b>{level}</b>.\n\nС чего начнем?",
         reply_markup=mode_keyboard(),
     )
 
