@@ -808,10 +808,10 @@ def onboarding_goal_kb():
 
 def onboarding_interest_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("Обсудить свежие новости 📰", callback_data="onboard:interest:news")],
-        [InlineKeyboardButton("AI-собеседник 🤖", callback_data="onboard:interest:ai")],
-        [InlineKeyboardButton("Тренировать грамматику 📚", callback_data="onboard:interest:grammar")],
-        [InlineKeyboardButton("Всё интересно! ✨", callback_data="onboard:interest:all")],
+        [InlineKeyboardButton("Обсуждение свежих новостей �️", callback_data="onboard:interest:news")],
+        [InlineKeyboardButton("Разговорная практика 🗣️", callback_data="onboard:interest:ai")],
+        [InlineKeyboardButton("Тренировка грамматики ✍️", callback_data="onboard:interest:grammar")],
+        [InlineKeyboardButton("Всё интересно! 🌟", callback_data="onboard:interest:all")],
     # Кнопка 'Меню' убрана из онбординга
     ])
 
@@ -1014,8 +1014,8 @@ async def onboard_interest(c: types.CallbackQuery):
     set_user_feeling(c.from_user.id, interest)
     await c.answer()
     await c.message.edit_text(
-        "Отлично!\n\n<b>Сколько минут в день ты готов уделять английскому?</b>\n\nМожно выбрать честно — даже 5 минут в день дают результат!",
-        reply_markup=onboarding_minutes_kb()
+        "Отлично, я с радостью помогу тебе🙌\nКакой формат тебе сейчас больше всего подходит?",
+        reply_markup=onboarding_interest_kb()
     )
 
 @dp.callback_query_handler(lambda c: c.data.startswith("onboard:minutes:"))
