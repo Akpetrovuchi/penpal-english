@@ -808,7 +808,7 @@ def onboarding_goal_kb():
 
 def onboarding_interest_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton("Обсуждение свежих новостей �️", callback_data="onboard:interest:news")],
+        [InlineKeyboardButton("Обсуждение свежих новостей 📰", callback_data="onboard:interest:news")],
         [InlineKeyboardButton("Разговорная практика 🗣️", callback_data="onboard:interest:ai")],
         [InlineKeyboardButton("Тренировка грамматики ✍️", callback_data="onboard:interest:grammar")],
         [InlineKeyboardButton("Всё интересно! 🌟", callback_data="onboard:interest:all")],
