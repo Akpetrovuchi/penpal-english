@@ -526,6 +526,20 @@ def set_user_subscription(user_id, status: str = "paid"):
     """)
     conn.commit()
 
+    # Migration: Upgrade user_id columns to BIGINT to support large Telegram IDs
+    migration_sqls = [
+        "ALTER TABLE users ALTER COLUMN id TYPE BIGINT",
+        "ALTER TABLE events ALTER COLUMN user_id TYPE BIGINT",
+        "ALTER TABLE messages ALTER COLUMN user_id TYPE BIGINT",
+        "ALTER TABLE vocab ALTER COLUMN user_id TYPE BIGINT"
+    ]
+    for sql in migration_sqls:
+        try:
+            c.execute(sql)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
 
 def save_user(user_id, username):
     with closing(db()) as conn:
