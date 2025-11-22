@@ -64,6 +64,7 @@ except Exception:
     ZoneInfo = None
     logging.warning("zoneinfo not available; timezone features will be limited")
 import asyncio
+import copy
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -788,6 +789,7 @@ def mode_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton("Обсудить новость 📰", callback_data="mode:news")],
             [InlineKeyboardButton("Разговорная практика 💬", callback_data="mode:chat")],
+            [InlineKeyboardButton("Играть 🎮", callback_data="mode:games")],
         ]
     )
 
@@ -1071,13 +1073,19 @@ async def choose_mode(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
     user_id = c.from_user.id
     mode = c.data.split(":")[1]
-    if mode not in {"news", "chat"}:
+    if mode not in {"news", "chat", "games"}:
         await c.answer("Неизвестный режим.", show_alert=True)
         return
     # Switching between news/chat should drop any previous chat topic state
     USER_CHAT_SESSIONS.pop(user_id, None)
     set_user_mode(user_id, mode)
     await c.answer()
+
+    if mode == "games":
+        log_event(user_id, "game_started", {"game_type": "truth_lie"})
+        await c.message.edit_text("Выбери тему для игры «2 правды и 1 ложь»:", reply_markup=truth_lie_topics_kb())
+        return
+
     if mode == "news":
         user = get_user(user_id)
         existing = []
@@ -1692,7 +1700,7 @@ async def pay_subscribe_cb(c: types.CallbackQuery):
     if not PAYMENTS_PROVIDER_TOKEN:
         await c.answer("Платежи недоступны", show_alert=True)
         return
-    # Reuse /subscribe flow
+          # Reuse /subscribe flow
     try:
         amount_minor = SUBSCRIPTION_PRICE * 100
     except Exception:
@@ -1941,7 +1949,7 @@ async def chat(m: types.Message):
         c = conn.cursor()
         c.execute(
             "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 6",
-            (m.from_user.id,),
+            (m.from_user.id,)
         )
         rows = c.fetchall()
     history = [{"role": r, "content": ct} for (r, ct) in rows[::-1]]
@@ -1970,9 +1978,368 @@ async def chat(m: types.Message):
              await m.answer("Отличная работа! Ты выполнил задание. 🎉\nТы можешь продолжить общение или вернуться в меню.", reply_markup=kb)
              USER_CHAT_SESSIONS.pop(m.from_user.id, None)
 
-if __name__ == "__main__":
-    init_db()
-    # start background daily sender task
-    loop = asyncio.get_event_loop()
-    # Removed daily_sender_loop: now handled by Heroku Scheduler
+# --- Truth/Lie Game Logic ---
+
+TRUTH_LIE_TOPICS = {
+    "health": "Здоровье 🧠",
+    "geography": "География 🌍",
+    "animals": "Животные 🐾",
+    "technologies": "Технологии 🤖"
+}
+
+TRUTH_LIE_FALLBACKS = {
+    "health": {
+        "facts": [
+            "Apples float in water because they are 25% air.",
+            "Your heart beats about 100,000 times a day.",
+            "Drinking water before meals makes you gain weight."
+        ],
+        "lie_index": 2,
+        "explanation": "Вода перед едой часто помогает снизить аппетит, а не набрать вес."
+    },
+    "geography": {
+        "facts": [
+            "Russia is the largest country in the world by area.",
+            "The Amazon River is the longest river in the world.",
+            "Antarctica is the driest continent on Earth."
+        ],
+        "lie_index": 1,
+        "explanation": "Самая длинная река в мире — Нил (хотя споры продолжаются, официально это Нил)."
+    },
+    "animals": {
+        "facts": [
+            "Octopuses have three hearts.",
+            "Cows can sleep standing up.",
+            "Goldfish have a memory span of only 3 seconds."
+        ],
+        "lie_index": 2,
+        "explanation": "У золотых рыбок память может сохраняться месяцами, миф о 3 секундах неверен."
+    },
+    "technologies": {
+        "facts": [
+            "The first computer mouse was made of wood.",
+            "Python was named after the snake species.",
+            "The QWERTY keyboard was designed to slow down typing."
+        ],
+        "lie_index": 1,
+        "explanation": "Язык Python назван в честь комедийной группы «Монти Пайтон», а не змеи."
+    }
+}
+
+def populate_game_sets():
+    """
+    Ensure there are enough game sets in the DB for each topic.
+    If not, generate them via GPT.
+    """
+    TARGET_SETS_PER_TOPIC = 10
+    
+    logging.info("Checking game sets population...")
+    
+    for topic_key, topic_label in TRUTH_LIE_TOPICS.items():
+        try:
+            # Check count
+            with closing(db()) as conn:
+                c = conn.cursor()
+                c.execute("SELECT COUNT(*) FROM game_truth_lie_sets WHERE topic = %s", (topic_key,))
+                count = c.fetchone()[0]
+            
+            if count >= TARGET_SETS_PER_TOPIC:
+                logging.info(f"Topic {topic_key} has enough sets ({count}).")
+                continue
+
+            needed = TARGET_SETS_PER_TOPIC - count
+            logging.info(f"Generating {needed} sets for {topic_key}...")
+            
+            topic_ru = topic_label
+            prompt = (
+                f"Сгенерируй 5 разных наборов для игры «2 правды и 1 ложь» по теме {topic_ru}.\n"
+                "Каждый набор должен содержать: 3 факта (2 правды, 1 ложь), индекс лжи (0, 1 или 2) и объяснение.\n"
+                "Верни строго валидный JSON список: \n"
+                "[\n"
+                "  {\"facts\": [\"fact1\", \"fact2\", \"fact3\"], \"lie_index\": 1, \"explanation\": \"...\"},\n"
+                "  ...\n"
+                "]\n"
+                "Факты на английском (B1), объяснение на русском."
+            )
+
+            # We loop until we have enough
+            while needed > 0:
+                try:
+                    resp = openai.ChatCompletion.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "Ты генератор контента. Отвечай только JSON."},
+                            {"role": "user", "content": prompt}
+                        ],
+                        temperature=0.7,
+                    )
+                    content = resp.choices[0].message["content"]
+                    if "```json" in content:
+                        content = content.split("```json")[1].split("```")[0].strip()
+                    elif "```" in content:
+                        content = content.split("```")[0].strip()
+                    
+                    sets = json.loads(content)
+                    if not isinstance(sets, list):
+                        sets = [sets] # Handle single object case
+                    
+                    with closing(db()) as conn:
+                        c = conn.cursor()
+                        for s in sets:
+                            if needed <= 0: break
+                            # Validate
+                            if "facts" in s and len(s["facts"]) == 3 and "lie_index" in s:
+                                # Insert
+                                c.execute("""
+                                    INSERT INTO game_truth_lie_sets (topic, facts, lie_index, explanation, created_at)
+                                    VALUES (%s, %s, %s, %s, now())
+                                """, (topic_key, json.dumps(s["facts"]), s["lie_index"], s["explanation"]))
+                                needed -= 1
+                        conn.commit()
+                        
+                except Exception as e:
+                    logging.error(f"Failed to generate batch for {topic_key}: {e}")
+                    break
+        except Exception as e:
+            logging.error(f"Error in populate_game_sets for {topic_key}: {e}")
+
+def get_truth_lie_set(user_id, topic_key):
+    """
+    Get a game set for the user from DB only.
+    """
+    with closing(db()) as conn:
+        c = conn.cursor()
+        # Find sets for this topic that user hasn't seen
+        c.execute("""
+            SELECT id, facts, lie_index, explanation 
+            FROM game_truth_lie_sets 
+            WHERE topic = %s 
+              AND id NOT IN (
+                  SELECT set_id FROM user_game_truth_lie_history WHERE user_id = %s
+              )
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, (topic_key, user_id))
+        row = c.fetchone()
+        
+        if row:
+            return {
+                "id": row[0],
+                "facts": row[1] if isinstance(row[1], list) else json.loads(row[1]),
+                "lie_index": row[2],
+                "explanation": row[3],
+                "source": "db"
+            }
+        
+        return None
+
+def save_truth_lie_history(user_id, set_id, answer_index, is_correct):
+    if set_id == -1: return # Don't save history for unsaved sets
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO user_game_truth_lie_history (user_id, set_id, answer_index, is_correct, created_at)
+                VALUES (%s, %s, %s, %s, now())
+            """, (user_id, set_id, answer_index, is_correct))
+            conn.commit()
+    except Exception:
+        logging.exception("Failed to save game history")
+
+def truth_lie_topics_kb():
+    rows = []
+    for key, label in TRUTH_LIE_TOPICS.items():
+        rows.append([InlineKeyboardButton(label, callback_data=f"game:truth_lie:topic:{key}")])
+    rows.append([InlineKeyboardButton("Меню 🏠", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+def truth_lie_answers_kb(set_id):
+    # Buttons 1, 2, 3
+    row = [
+        InlineKeyboardButton("1", callback_data=f"game:truth_lie:answer:{set_id}:0"),
+        InlineKeyboardButton("2", callback_data=f"game:truth_lie:answer:{set_id}:1"),
+        InlineKeyboardButton("3", callback_data=f"game:truth_lie:answer:{set_id}:2"),
+    ]
+    # Add translate button
+    translate_btn = [InlineKeyboardButton("Перевести 🇷🇺", callback_data="game:truth_lie:translate")]
+    return InlineKeyboardMarkup(inline_keyboard=[row, translate_btn, [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+
+def truth_lie_post_game_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Сыграть ещё раз 🎮", callback_data="game:truth_lie:start")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+    ])
+
+# --- Handlers ---
+
+@dp.message_handler(commands=["game_truth_lie"])
+async def cmd_game_truth_lie(m: types.Message):
+    log_event(m.from_user.id, "game_started", {"game_type": "truth_lie"})
+    USER_CHAT_SESSIONS.pop(m.from_user.id, None) # Clear other sessions
+    await m.answer("Выбери тему для игры «2 правды и 1 ложь»:", reply_markup=truth_lie_topics_kb())
+
+@dp.callback_query_handler(lambda c: c.data == "game:truth_lie:start")
+async def cb_game_restart(c: types.CallbackQuery):
+    await c.answer()
+    await c.message.edit_text("Выбери тему:", reply_markup=truth_lie_topics_kb())
+
+@dp.callback_query_handler(lambda c: c.data.startswith("game:truth_lie:topic:"))
+async def cb_truth_lie_topic(c: types.CallbackQuery):
+    topic_key = c.data.split(":")[-1]
+    user_id = c.from_user.id
+    log_event(user_id, "truth_lie_topic_selected", {"topic": topic_key})
+    
+    await c.answer("Ищу факты... 🕵️")
+    
+    game_set = get_truth_lie_set(user_id, topic_key)
+    if not game_set:
+        await c.message.edit_text("Не удалось загрузить игру. Попробуй позже.", reply_markup=truth_lie_post_game_kb())
+        return
+
+    # Save session state
+    USER_CHAT_SESSIONS[user_id] = {
+        "type": "truth_lie",
+        "set_id": game_set["id"],
+        "lie_index": game_set["lie_index"],
+        "explanation": game_set["explanation"],
+        "topic": topic_key,
+        "facts": game_set["facts"]
+    }
+    
+    log_event(user_id, "truth_lie_set_shown", {
+        "topic": topic_key, 
+        "set_id": game_set["id"], 
+        "source": game_set.get("source")
+    })
+
+    facts_text = ""
+    for i, f in enumerate(game_set["facts"]):
+        facts_text += f"{i+1}) {f}\n"
+
+    msg = (
+        f"Тема: {TRUTH_LIE_TOPICS.get(topic_key, topic_key)}\n\n"
+        "🕵️ Я пришлю 3 факта. Два из них правдивы, один — ложным, но правдоподобным. Угадай, какой факт ложный: 1, 2 или 3.\n\n"
+        f"{facts_text}"
+    )
+    
+    await c.message.edit_text(msg, reply_markup=truth_lie_answers_kb(game_set["id"]))
+
+@dp.callback_query_handler(lambda c: c.data == "game:truth_lie:translate")
+async def cb_truth_lie_translate(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    session = USER_CHAT_SESSIONS.get(user_id)
+    
+    if not session or session.get("type") != "truth_lie" or not session.get("facts"):
+        await c.answer("Перевод недоступен.", show_alert=True)
+        return
+
+    await c.answer("Перевожу... ⏳")
+    
+    facts = session["facts"]
+    text_to_translate = "\n".join([f"{i+1}) {f}" for i, f in enumerate(facts)])
+    
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Ты переводчик. Переведи эти факты на русский язык. Сохрани нумерацию."},
+                {"role": "user", "content": text_to_translate}
+            ],
+            temperature=0.3,
+        )
+        translation = resp.choices[0].message["content"]
+        await c.message.answer(f"🇷🇺 Перевод:\n\n{translation}")
+    except Exception:
+        logging.exception("Translation failed")
+        await c.message.answer("Не удалось перевести. Попробуй позже.")
+
+@dp.callback_query_handler(lambda c: c.data.startswith("game:truth_lie:answer:"))
+async def cb_truth_lie_answer(c: types.CallbackQuery):
+    parts = c.data.split(":")
+    set_id = int(parts[3])
+    answer_idx = int(parts[4])
+    user_id = c.from_user.id
+    
+    session = USER_CHAT_SESSIONS.get(user_id)
+    
+    # Validate session
+    if not session or session.get("type") != "truth_lie" or session.get("set_id") != set_id:
+        await c.answer("Эта игра устарела.", show_alert=True)
+        await c.message.edit_text("Игра устарела. Начни новую.", reply_markup=truth_lie_post_game_kb())
+        return
+
+    correct_lie_idx = session["lie_index"]
+    is_correct = (answer_idx == correct_lie_idx)
+    
+    log_event(user_id, "truth_lie_answered", {
+        "set_id": set_id, 
+        "answer_index": answer_idx, 
+        "is_correct": is_correct
+    })
+    
+    # Save history
+    save_truth_lie_history(user_id, set_id, answer_idx, is_correct)
+    
+    # Prepare result message
+    if is_correct:
+        res_header = "✅ Верно! Отличная работа!"
+        res_body = f"Ложным был факт №{correct_lie_idx + 1}. {session['explanation']}"
+    else:
+        res_header = "Почти, но нет 🙂"
+        res_body = f"На самом деле ложный факт — №{correct_lie_idx + 1}. {session['explanation']}"
+        
+    await c.message.edit_text(
+        f"{res_header}\n\n{res_body}",
+        reply_markup=truth_lie_post_game_kb()
+    )
+    
+    log_event(user_id, "truth_lie_completed", {
+        "set_id": set_id, 
+        "topic": session["topic"], 
+        "is_correct": is_correct
+    })
+    
+    # Clear session
+    USER_CHAT_SESSIONS.pop(user_id, None)
+
+def init_game_tables():
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS game_truth_lie_sets (
+                    id SERIAL PRIMARY KEY,
+                    topic TEXT,
+                    facts JSONB,
+                    lie_index INTEGER,
+                    explanation TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS user_game_truth_lie_history (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    set_id INTEGER,
+                    answer_index INTEGER,
+                    is_correct BOOLEAN,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+            """)
+            conn.commit()
+            
+            # Migration: Ensure created_at exists
+            try:
+                c.execute("ALTER TABLE user_game_truth_lie_history ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT now()")
+                conn.commit()
+            except Exception:
+                conn.rollback()
+    except Exception as e:
+        logging.error(f"Failed to init game tables: {e}")
+
+if __name__ == '__main__':
+    # Ensure game tables exist
+    init_game_tables()
+    # Populate game sets if needed
+    populate_game_sets()
     executor.start_polling(dp, skip_updates=True)
