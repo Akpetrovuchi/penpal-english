@@ -226,8 +226,13 @@ async def send_assistant_intro_delayed(user_id, text, topic_key, delay=10):
     try:
         await asyncio.sleep(delay)
         emoji = persona_emoji(topic_key)
+        full_text = f"{emoji} {text}"
+        # Save message so translation works
+        save_msg(user_id, "assistant", full_text)
+        
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
         # include emoji and send as a natural reply
-        await bot.send_message(user_id, f"{emoji} {text}")
+        await bot.send_message(user_id, full_text, reply_markup=kb)
     except Exception:
         logging.exception("Failed to send delayed assistant intro")
 
@@ -1117,6 +1122,7 @@ async def choose_chat_topic(c: types.CallbackQuery):
     tasks = make_tasks_for_topic(topic_key)
     # we will require 2 tasks to be completed (or all if fewer)
     USER_CHAT_SESSIONS[user_id] = {
+        "type": "roleplay",
         "topic": topic_key,
         "tasks": tasks,
         "completed_count": 0,
@@ -1372,14 +1378,21 @@ async def news_done(c: types.CallbackQuery):
     # Send only the first question with instructions and an 'Another question' button
     q0 = questions[0]
     instr = (
-        "Отлично — ты прочитал(а) статью! Я задам по одному вопросу за раз.\n"
-        "Ответь, когда будешь готов(а), или нажми «Другой вопрос», чтобы увидеть другой вопрос.\n\n"
+        "Отлично - ты прочитал(а) статью! Чтобы выполнить задание - ответь на три вопроса или напиши bye 👋\n\n"
     )
+
+    # Initialize news session
+    USER_CHAT_SESSIONS[c.from_user.id] = {
+        "type": "news",
+        "cache_id": cache_id,
+        "answers_count": 0,
+        "last_q_index": 0
+    }
+
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton("Другой вопрос 🔁", callback_data=f"news:next:{cache_id}:1")],
-            [InlineKeyboardButton("Поменять статью 🔁", callback_data="news:more")],
-            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+            [InlineKeyboardButton("Перевести 🔁", callback_data=f"translate:news:{cache_id}:0")]
         ]
     )
     await bot.send_message(c.from_user.id, instr + q0, reply_markup=kb)
@@ -1393,6 +1406,12 @@ async def news_next(c: types.CallbackQuery):
     save_msg(c.from_user.id, "user", c.data)
     cache_id = int(parts[2])
     idx = int(parts[3])
+
+    # Update session index if it exists and is news
+    session = USER_CHAT_SESSIONS.get(c.from_user.id)
+    if session and session.get("type") == "news":
+        session["last_q_index"] = idx
+
     with closing(db()) as conn:
         c_db = conn.cursor()
         c_db.execute("SELECT questions FROM news_cache WHERE id=%s", (cache_id,))
@@ -1413,9 +1432,8 @@ async def news_next(c: types.CallbackQuery):
                 "Другой вопрос 🔁", callback_data=f"news:next:{cache_id}:{next_idx}"
             )
         )
-    kb_buttons.append(InlineKeyboardButton("Поменять статью 🔁", callback_data="news:more"))
-    kb_buttons.append(InlineKeyboardButton("Меню 🏠", callback_data="menu:main"))
     kb = InlineKeyboardMarkup(inline_keyboard=[kb_buttons])
+    kb.add(InlineKeyboardButton("Перевести 🔁", callback_data=f"translate:news:{cache_id}:{idx}"))
     await bot.send_message(c.from_user.id, q, reply_markup=kb)
 
 @dp.callback_query_handler(lambda c: c.data == "menu:main")
@@ -1748,6 +1766,57 @@ async def cmd_settz(m: types.Message):
     await m.answer(f"Timezone set to {tz}. I will message you at 12:00 local time.")
 
 
+@dp.callback_query_handler(lambda c: c.data.startswith("translate:"))
+async def translate_message(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    parts = c.data.split(":")
+    mode = parts[1]
+    text_to_translate = None
+
+    if mode == "chat":
+        # Fetch last assistant message
+        with closing(db()) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT content FROM messages WHERE user_id=%s AND role='assistant' ORDER BY id DESC LIMIT 1", (user_id,))
+            row = cur.fetchone()
+            if row:
+                text_to_translate = row[0]
+    elif mode == "news":
+        cache_id = int(parts[2])
+        idx = int(parts[3])
+        with closing(db()) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT questions FROM news_cache WHERE id=%s", (cache_id,))
+            row = cur.fetchone()
+            if row:
+                questions = json.loads(row[0] or "[]")
+                if 0 <= idx < len(questions):
+                    text_to_translate = questions[idx]
+
+    if not text_to_translate:
+        await c.answer("Нечего переводить.", show_alert=True)
+        return
+
+    await c.answer("Перевожу... ⏳")
+    
+    # Perform translation
+    try:
+        resp = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a translator. Translate the following English text to Russian. Return only the translation."},
+                {"role": "user", "content": text_to_translate}
+            ],
+            temperature=0.3,
+        )
+        translated = resp.choices[0].message["content"]
+    except Exception:
+        logging.exception("Translation failed")
+        translated = "Перевод временно недоступен."
+
+    await bot.send_message(user_id, f"<b>Перевод:</b>\n{translated}")
+
+
 @dp.message_handler()
 async def chat(m: types.Message):
     log_event(m.from_user.id, "user_message", {"text": m.text})
@@ -1758,22 +1827,32 @@ async def chat(m: types.Message):
         return
     # If there is an active chat session with tasks, handle it here
     session = USER_CHAT_SESSIONS.get(m.from_user.id)
+
+    # Unified "bye" check for both roleplay and news modes
     if session:
-        session["turns"] += 1
         text = (m.text or "").lower()
-        # immediate exit
         if "bye" in text or "bye 👋" in text:
-            # If user completed at least one task, consider topic completed as well
-            if session.get("completed_count", 0) > 0:
-                log_event(
-                    m.from_user.id,
-                    "topic_completed",
-                    {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
-                )
+            session_type = session.get("type", "roleplay")
+            if session_type == "roleplay":
+                log_event(m.from_user.id, "chat_closed", {"topic": session.get("topic")})
+                # If user completed at least one task, consider topic completed as well
+                if session.get("completed_count", 0) > 0:
+                    log_event(
+                        m.from_user.id,
+                        "topic_completed",
+                        {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
+                    )
+            elif session_type == "news":
+                log_event(m.from_user.id, "reading_closed", {"cache_id": session.get("cache_id")})
+
             USER_CHAT_SESSIONS.pop(m.from_user.id, None)
-            await m.answer("Диалог завершён. Возвращаю тебя в меню активности.", reply_markup=mode_keyboard())
+            await m.answer("Хорошая работа! Возвращаю тебя в меню", reply_markup=mode_keyboard())
             return
 
+    if session and session.get("type", "roleplay") == "roleplay":
+        session["turns"] += 1
+        text = (m.text or "").lower()
+        
         # check each task for completion using the language model
         tasks = session.get("tasks", [])
         newly_completed = []
@@ -1853,7 +1932,9 @@ async def chat(m: types.Message):
             logging.exception("Roleplay LM call failed; using fallback reply")
             assistant_next = "Спасибо — давай продолжим. Можешь ответить ещё?"
 
-        await m.answer(assistant_next)
+        save_msg(m.from_user.id, "assistant", assistant_next)
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+        await m.answer(assistant_next, reply_markup=kb)
         return
     # Build short context (last ~6 turns)
     with closing(db()) as conn:
@@ -1876,8 +1957,18 @@ async def chat(m: types.Message):
     # No longer mining 'Useful:' phrases. Corrections are handled by the assistant per SYSTEM_PROMPT.
     save_msg(m.from_user.id, "assistant", reply)
     log_event(m.from_user.id, "assistant_message", {"text": reply}, session_id=session_id)
-    await m.answer(reply)
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    await m.answer(reply, reply_markup=kb)
 
+    # Check for News completion
+    if session and session.get("type") == "news":
+        session["answers_count"] += 1
+        # Trigger completion if user has answered at least 3 times
+        if session["answers_count"] >= 3:
+             log_event(m.from_user.id, "reading_completed", {"cache_id": session.get("cache_id")})
+             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+             await m.answer("Отличная работа! Ты выполнил задание. 🎉\nТы можешь продолжить общение или вернуться в меню.", reply_markup=kb)
+             USER_CHAT_SESSIONS.pop(m.from_user.id, None)
 
 if __name__ == "__main__":
     init_db()
