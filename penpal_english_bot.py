@@ -790,6 +790,7 @@ def mode_keyboard():
             [InlineKeyboardButton("Обсудить новость 📰", callback_data="mode:news")],
             [InlineKeyboardButton("Разговорная практика 💬", callback_data="mode:chat")],
             [InlineKeyboardButton("Играть 🎮", callback_data="mode:games")],
+            [InlineKeyboardButton("👤 Профиль", callback_data="mode:profile")],
         ]
     )
 
@@ -991,7 +992,7 @@ async def start(m: types.Message):
         logging.exception("Failed to reset user topics/onboarding on /start")
     try:
         await m.answer(
-            "Супер, ты на шаг ближе к цели 🎯\n\nПеред тем как начнем, расскажи немного о себе:\n\n<b>Какая твоя главная цель в изучении английского?</b>",
+            "Супер, ты на шаг ближе к цели 🎯\n\nПеред тем как начнём, расскажи немного о себе:\n\n<b>Какая твоя главная цель в изучении английского?</b>",
             reply_markup=onboarding_goal_kb(),
         )
     except Exception:
@@ -1067,7 +1068,7 @@ async def choose_level(c: types.CallbackQuery):
     )
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("mode:"))
+@dp.callback_query_handler(lambda c: c.data.startswith("mode:") and c.data != "mode:profile")
 async def choose_mode(c: types.CallbackQuery):
     log_event(c.from_user.id, "mode_selected", {"mode": c.data.split(":")[1]})
     save_msg(c.from_user.id, "user", c.data)
@@ -1700,7 +1701,8 @@ async def pay_subscribe_cb(c: types.CallbackQuery):
     if not PAYMENTS_PROVIDER_TOKEN:
         await c.answer("Платежи недоступны", show_alert=True)
         return
-          # Reuse /subscribe flow
+         
+    # Reuse /subscribe flow
     try:
         amount_minor = SUBSCRIPTION_PRICE * 100
     except Exception:
@@ -1828,6 +1830,15 @@ async def translate_message(c: types.CallbackQuery):
 @dp.message_handler()
 async def chat(m: types.Message):
     log_event(m.from_user.id, "user_message", {"text": m.text})
+
+    # Update streak on any message
+    update_streak(m.from_user.id)
+
+    # Check for dictionary trigger
+    if await maybe_add_to_dictionary(m):
+        # If dictionary action was taken, do not continue to chat response
+        return
+
     user = get_user(m.from_user.id)
     if not user or not user.get("level"):
         save_user(m.from_user.id, m.from_user.username or "")
@@ -2141,6 +2152,10 @@ def save_truth_lie_history(user_id, set_id, answer_index, is_correct):
             c.execute("""
                 INSERT INTO user_game_truth_lie_history (user_id, set_id, answer_index, is_correct, created_at)
                 VALUES (%s, %s, %s, %s, now())
+                ON CONFLICT (user_id, set_id) DO UPDATE 
+                SET answer_index = EXCLUDED.answer_index,
+                    is_correct = EXCLUDED.is_correct,
+                    created_at = now()
             """, (user_id, set_id, answer_index, is_correct))
             conn.commit()
     except Exception:
@@ -2302,6 +2317,45 @@ async def cb_truth_lie_answer(c: types.CallbackQuery):
     # Clear session
     USER_CHAT_SESSIONS.pop(user_id, None)
 
+# --- Profile Handlers ---
+
+@dp.message_handler(commands=["profile"])
+async def cmd_profile(m: types.Message):
+    update_streak(m.from_user.id)
+    await show_profile(m.from_user.id, m)
+
+@dp.callback_query_handler(lambda c: c.data == "mode:profile")
+async def cb_mode_profile(c: types.CallbackQuery):
+    update_streak(c.from_user.id)
+    await c.answer()
+    await show_profile(c.from_user.id, c.message)
+
+@dp.callback_query_handler(lambda c: c.data == "profile_buy_unlimited")
+async def cb_profile_buy(c: types.CallbackQuery):
+    update_streak(c.from_user.id)
+    await c.answer("Скоро здесь появится подписка 🙂", show_alert=True)
+
+@dp.callback_query_handler(lambda c: c.data == "profile_news_settings")
+async def cb_profile_news(c: types.CallbackQuery):
+    update_streak(c.from_user.id)
+    await c.answer()
+    # Reuse logic from cmd_newstopics
+    set_user_mode(c.from_user.id, "news")
+    user = get_user(c.from_user.id)
+    existing = []
+    if user.get("topics"):
+        existing = [t.strip() for t in (user.get("topics") or "").split(",") if t.strip()]
+    await c.message.edit_text(
+        "Выбери темы, которые тебе нравятся (эти темы всегда можно изменить командой /newstopics):",
+        reply_markup=topic_keyboard(existing),
+    )
+
+@dp.callback_query_handler(lambda c: c.data == "profile_back_menu")
+async def cb_profile_back(c: types.CallbackQuery):
+    update_streak(c.from_user.id)
+    await c.answer()
+    await c.message.edit_text("Меню активности — выбери, что хочешь сделать:", reply_markup=mode_keyboard())
+
 def init_game_tables():
     try:
         with closing(db()) as conn:
@@ -2336,6 +2390,157 @@ def init_game_tables():
                 conn.rollback()
     except Exception as e:
         logging.error(f"Failed to init game tables: {e}")
+
+# Helper functions for Profile, Streak, and Dictionary features
+
+def update_streak(user_id):
+    """
+    Updates user streak based on last_active_date.
+    Should be called on every user interaction.
+    """
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT streak_count, last_active_date, max_streak FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        
+        if not row:
+            return # User not found or not initialized
+
+        streak_count = row[0] or 0
+        last_active = row[1] # date object or None
+        max_streak = row[2] or 0
+        
+        new_streak = streak_count
+        new_max = max_streak
+        
+        if last_active is None:
+            new_streak = 1
+            new_max = max(new_max, 1)
+        elif last_active == today:
+            pass # Already active today
+        elif last_active == today - timedelta(days=1):
+            new_streak += 1
+            new_max = max(new_max, new_streak)
+        elif last_active < today - timedelta(days=1):
+            new_streak = 1 # Streak broken
+            
+        # Update DB
+        c.execute("""
+            UPDATE users 
+            SET streak_count=%s, last_active_date=%s, max_streak=%s 
+            WHERE id=%s
+        """, (new_streak, today, new_max, user_id))
+        conn.commit()
+
+async def maybe_add_to_dictionary(m: types.Message):
+    """
+    Checks if message ends with 'словарь'.
+    If so, adds the preceding text to user_dictionary.
+    Returns True if dictionary action was taken (even if failed), False otherwise.
+    """
+    text = (m.text or "").strip()
+    if not text:
+        return False
+        
+    # Check for "словарь" trigger
+    # We look for it at the end, case-insensitive
+    lower_text = text.lower()
+    trigger = "словарь"
+    
+    if not lower_text.endswith(trigger):
+        return False
+        
+    # Extract the word/phrase
+    # "apple словарь" -> "apple"
+    # "словарь" -> empty
+    
+    content = text[:-len(trigger)].strip()
+    
+    user_id = m.from_user.id
+    
+    if not content:
+        # User just sent "словарь"
+        await m.answer("Напиши слово перед «словарь», например: apple словарь 🙂")
+        return True
+        
+    # Try to add to DB
+    added = False
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            # Check existence
+            c.execute("SELECT 1 FROM user_dictionary WHERE user_id=%s AND word=%s", (user_id, content))
+            if c.fetchone():
+                await m.answer(f"ℹ️ «{content}» уже есть в словаре")
+                log_event(user_id, "dictionary_add_attempt", {"word": content, "success": False, "reason": "duplicate"})
+            else:
+                # Check if created_at column exists, if not, don't use it or migrate.
+                # For simplicity, let's try inserting without created_at if it fails, or just assume schema is correct.
+                # The error log showed: column "created_at" of relation "user_dictionary" does not exist.
+                # So we should remove created_at from the query.
+                c.execute("INSERT INTO user_dictionary (user_id, word) VALUES (%s, %s)", (user_id, content))
+                conn.commit()
+                added = True
+                log_event(user_id, "dictionary_add_attempt", {"word": content, "success": True})
+    except Exception as e:
+        logging.error(f"Dictionary insert error: {e}")
+        log_event(user_id, "error", {"where": "dictionary_insert", "msg": str(e)[:200]})
+        
+    if added:
+        # Generate explanation
+        await m.answer(f"✅ «{content}» добавлено в словарь. Ищу значение... ⏳")
+        try:
+            explanation = await gpt_chat([
+                {"role": "system", "content": "You are a helpful dictionary assistant. Provide a brief definition and translation for the given word/phrase in Russian. Format: '🇬🇧 Definition: ...\n🇷🇺 Перевод: ...'"},
+                {"role": "user", "content": content}
+            ])
+            await m.answer(f"📖 <b>{content}</b>\n\n{explanation}")
+        except Exception:
+            # If fails, just ignore
+            pass
+
+    return True # Action taken
+
+def get_profile_data(user_id):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT streak_count FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        streak = row[0] if row else 0
+        
+        c.execute("SELECT COUNT(*) FROM user_dictionary WHERE user_id=%s", (user_id,))
+        dict_count = c.fetchone()[0]
+        
+    return streak, dict_count
+
+def profile_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Приобрести бесконечный доступ 💎", callback_data="profile_buy_unlimited")],
+        [InlineKeyboardButton("Настроить темы новостей 🗞", callback_data="profile_news_settings")],
+        [InlineKeyboardButton("Меню ◀️", callback_data="profile_back_menu")]
+    ])
+
+async def show_profile(user_id, messageable):
+    """
+    Shows profile. messageable can be types.Message or types.CallbackQuery.message
+    """
+    streak, dict_count = get_profile_data(user_id)
+    
+    text = (
+        "<b>Твой профиль</b> 👤\n\n"
+        f"Победная серия: <b>{streak} дн. подряд</b> 🔥\n"
+        f"Слов в словаре: <b>{dict_count}</b> 📚"
+    )
+    
+    try:
+        # Try editing first (if it's from a callback)
+        await messageable.edit_text(text, reply_markup=profile_keyboard())
+    except Exception:
+        # If edit fails (e.g. called from command), send new
+        await messageable.answer(text, reply_markup=profile_keyboard())
+
+    log_event(user_id, "profile_opened", {})
 
 if __name__ == '__main__':
     # Ensure game tables exist
