@@ -794,6 +794,15 @@ def mode_keyboard():
         ]
     )
 
+def games_selection_keyboard():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton("2 правды 1 ложь 🤥", callback_data="game:truth_lie:start")],
+            [InlineKeyboardButton("Исправь грамматику 🎯", callback_data="game:grammar:start")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+        ]
+    )
+
 
 def news_topics_keyboard(existing_topics=None):
     """Keyboard for (re)selecting news topics.
@@ -1083,8 +1092,8 @@ async def choose_mode(c: types.CallbackQuery):
     await c.answer()
 
     if mode == "games":
-        log_event(user_id, "game_started", {"game_type": "truth_lie"})
-        await c.message.edit_text("Выбери тему для игры «2 правды и 1 ложь»:", reply_markup=truth_lie_topics_kb())
+        log_event(user_id, "games_menu_opened", {})
+        await c.message.edit_text("Во что сыграем?", reply_markup=games_selection_keyboard())
         return
 
     if mode == "news":
@@ -2182,6 +2191,47 @@ def save_truth_lie_history(user_id, set_id, answer_index, is_correct):
     except Exception:
         logging.exception("Failed to save game history")
 
+def get_grammar_set(user_id, level):
+    """
+    Get a grammar game set for the user from DB only.
+    """
+    with closing(db()) as conn:
+        c = conn.cursor()
+        # Find sets for this level that user hasn't seen
+        c.execute("""
+            SELECT id, sentences, wrong_index, explanation 
+            FROM grammar_sets 
+            WHERE level = %s 
+              AND id NOT IN (
+                  SELECT set_id FROM user_game_grammar_history WHERE user_id = %s
+              )
+            ORDER BY RANDOM()
+            LIMIT 1
+        """, (level, user_id))
+        row = c.fetchone()
+        
+        if row:
+            return {
+                "id": row[0],
+                "sentences": row[1] if isinstance(row[1], list) else json.loads(row[1]),
+                "wrong_index": row[2],
+                "explanation": row[3]
+            }
+        
+        return None
+
+def save_grammar_history(user_id, set_id, answer_index, is_correct):
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO user_game_grammar_history (user_id, set_id, answer_index, is_correct, created_at)
+                VALUES (%s, %s, %s, %s, now())
+            """, (user_id, set_id, answer_index, is_correct))
+            conn.commit()
+    except Exception:
+        logging.exception("Failed to save grammar game history")
+
 def truth_lie_topics_kb():
     rows = []
     for key, label in TRUTH_LIE_TOPICS.items():
@@ -2203,6 +2253,25 @@ def truth_lie_answers_kb(set_id):
 def truth_lie_post_game_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton("Сыграть ещё раз 🎮", callback_data="game:truth_lie:start")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+    ])
+
+def grammar_levels_kb():
+    levels = ["A2", "B1", "B2", "C1"]
+    row = [InlineKeyboardButton(l, callback_data=f"game:grammar:level:{l}") for l in levels]
+    return InlineKeyboardMarkup(inline_keyboard=[row, [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+
+def grammar_answers_kb(set_id):
+    row = [
+        InlineKeyboardButton("1", callback_data=f"game:grammar:answer:{set_id}:0"),
+        InlineKeyboardButton("2", callback_data=f"game:grammar:answer:{set_id}:1"),
+        InlineKeyboardButton("3", callback_data=f"game:grammar:answer:{set_id}:2"),
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=[row, [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+
+def grammar_post_game_kb(level):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Следующий сет ➡️", callback_data=f"game:grammar:level:{level}")],
         [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
     ])
 
@@ -2338,6 +2407,107 @@ async def cb_truth_lie_answer(c: types.CallbackQuery):
     # Clear session
     USER_CHAT_SESSIONS.pop(user_id, None)
 
+# --- Grammar Game Handlers ---
+
+@dp.callback_query_handler(lambda c: c.data == "game:grammar:start")
+async def cb_game_grammar_start(c: types.CallbackQuery):
+    log_event(c.from_user.id, "grammar_game_opened", {})
+    USER_CHAT_SESSIONS.pop(c.from_user.id, None)
+    await c.answer()
+    await c.message.edit_text("Выбери уровень сложности:", reply_markup=grammar_levels_kb())
+
+@dp.callback_query_handler(lambda c: c.data.startswith("game:grammar:level:"))
+async def cb_grammar_level(c: types.CallbackQuery):
+    level = c.data.split(":")[-1]
+    user_id = c.from_user.id
+    log_event(user_id, "grammar_level_selected", {"level": level})
+    
+    await c.answer("Ищу задания... 🕵️")
+    
+    game_set = get_grammar_set(user_id, level)
+    if not game_set:
+        log_event(user_id, "grammar_no_sets_left", {"level": level})
+        await c.message.edit_text(f"Ты прошёл все задания уровня {level}! 🚀", reply_markup=mode_keyboard())
+        return
+
+    # Save session state
+    USER_CHAT_SESSIONS[user_id] = {
+        "type": "grammar",
+        "set_id": game_set["id"],
+        "wrong_index": game_set["wrong_index"],
+        "explanation": game_set["explanation"],
+        "level": level,
+        "sentences": game_set["sentences"]
+    }
+    
+    log_event(user_id, "grammar_set_shown", {
+        "level": level, 
+        "set_id": game_set["id"]
+    })
+
+    sentences_text = ""
+    for i, s in enumerate(game_set["sentences"]):
+        sentences_text += f"{i+1}) {s}\n"
+
+    msg = (
+        f"Уровень: {level}\n\n"
+        "🎯 Найди предложение с грамматической ошибкой (оно здесь одно):\n\n"
+        f"{sentences_text}"
+    )
+    
+    await c.message.edit_text(msg, reply_markup=grammar_answers_kb(game_set["id"]))
+
+@dp.callback_query_handler(lambda c: c.data.startswith("game:grammar:answer:"))
+async def cb_grammar_answer(c: types.CallbackQuery):
+    parts = c.data.split(":")
+    set_id = int(parts[3])
+    answer_idx = int(parts[4])
+    user_id = c.from_user.id
+    
+    session = USER_CHAT_SESSIONS.get(user_id)
+    
+    # Validate session
+    if not session or session.get("type") != "grammar" or session.get("set_id") != set_id:
+        await c.answer("Эта игра устарела.", show_alert=True)
+        await c.message.edit_text("Игра устарела. Начни новую.", reply_markup=grammar_levels_kb())
+        return
+
+    correct_wrong_idx = session["wrong_index"]
+    
+    # Fix for 1-based indexing in DB (if present)
+    # If correct_wrong_idx is 1, 2, 3 -> treat as 1-based.
+    # If correct_wrong_idx is 0 -> treat as 0-based.
+    real_idx = correct_wrong_idx - 1 if correct_wrong_idx > 0 else correct_wrong_idx
+    
+    is_correct = (answer_idx == real_idx)
+    
+    log_event(user_id, "grammar_answer_submitted", {
+        "set_id": set_id, 
+        "answer_index": answer_idx, 
+        "is_correct": is_correct
+    })
+    
+    # Save history
+    save_grammar_history(user_id, set_id, answer_idx, is_correct)
+    
+    # Prepare result message
+    if is_correct:
+        res_header = "✅ Верно! Ты нашёл ошибку."
+        res_body = f"{session['explanation']}"
+    else:
+        # Display 1-based index
+        display_idx = correct_wrong_idx if correct_wrong_idx > 0 else correct_wrong_idx + 1
+        res_header = "Не совсем так ❌"
+        res_body = f"Ошибка была в предложении №{display_idx}. {session['explanation']}"
+        
+    await c.message.edit_text(
+        f"{res_header}\n\n{res_body}",
+        reply_markup=grammar_post_game_kb(session["level"])
+    )
+    
+    # Clear session
+    USER_CHAT_SESSIONS.pop(user_id, None)
+
 # --- Profile Handlers ---
 
 @dp.message_handler(commands=["profile"])
@@ -2409,6 +2579,30 @@ def init_game_tables():
                 conn.commit()
             except Exception:
                 conn.rollback()
+
+            # --- Grammar Game Tables ---
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS grammar_sets (
+                    id SERIAL PRIMARY KEY,
+                    level TEXT,
+                    sentences JSONB,
+                    wrong_index INTEGER,
+                    explanation TEXT,
+                    source TEXT,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+            """)
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS user_game_grammar_history (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    set_id INTEGER,
+                    answer_index INTEGER,
+                    is_correct BOOLEAN,
+                    created_at TIMESTAMPTZ DEFAULT now()
+                )
+            """)
+            conn.commit()
     except Exception as e:
         logging.error(f"Failed to init game tables: {e}")
 
