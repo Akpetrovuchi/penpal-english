@@ -1158,7 +1158,8 @@ async def choose_chat_topic(c: types.CallbackQuery):
     USER_CHAT_SESSIONS[user_id]["assistant_intro"] = assistant_intro
 
     # Send first message: topic, rules and tasks
-    await c.message.edit_text(intro + "\n\nЗадания:\n" + tasks_list)
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести задания 🇷🇺", callback_data="translate:tasks"))
+    await c.message.edit_text(intro + "\n\nЗадания:\n" + tasks_list, reply_markup=kb)
     # Send assistant intro as a separate message after 10 seconds without the word 'Bot' and with emoji
     try:
         asyncio.create_task(send_assistant_intro_delayed(c.from_user.id, assistant_intro, topic_key, delay=10))
@@ -1802,6 +1803,11 @@ async def translate_message(c: types.CallbackQuery):
                 questions = json.loads(row[0] or "[]")
                 if 0 <= idx < len(questions):
                     text_to_translate = questions[idx]
+    elif mode == "tasks":
+        session = USER_CHAT_SESSIONS.get(user_id)
+        if session and "tasks" in session:
+            tasks = session["tasks"]
+            text_to_translate = "\n".join([f"{t['id']}) {t['text']}" for t in tasks[:3]])
 
     if not text_to_translate:
         await c.answer("Нечего переводить.", show_alert=True)
@@ -1930,8 +1936,19 @@ async def chat(m: types.Message):
 
         # Otherwise, ask the language model to (a) provide brief corrections, (b) continue the roleplay persona
         persona_intro = session.get("assistant_intro", PERSONA_PROMPTS.get(session.get("topic"), "You are a friendly conversational partner."))
+        
+        # Fetch history for context
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute(
+                "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 20",
+                (m.from_user.id,)
+            )
+            rows = c.fetchall()
+        history = [{"role": r, "content": ct} for (r, ct) in rows[::-1]]
+
         try:
-            # Build messages: system=persona instruction, user=the user's reply + short task status
+            # Build messages: system=persona instruction, history, user=the user's reply + short task status
             sys_msg = persona_intro
             user_msg = (
                 f"User reply: {m.text}\n\nTasks completed so far: {session['completed_count']} of 2.\n"
@@ -1941,9 +1958,12 @@ async def chat(m: types.Message):
                 "Example: 🔴 <i>I has a dog</i> → ✅ <b><u>I have a dog</u></b> — subject-verb agreement\n"
                 "2) Continue the roleplay as the persona (speak in English). First show corrections (if any), then a short assistant reply that continues the scene (one question or prompt). Keep the entire reply concise and in English."
             )
+            
+            messages = [{"role": "system", "content": sys_msg}] + history + [{"role": "user", "content": user_msg}]
+
             resp = openai.ChatCompletion.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "system", "content": sys_msg}, {"role": "user", "content": user_msg}],
+                messages=messages,
                 temperature=0.5,
             )
             assistant_next = resp.choices[0].message["content"]
@@ -1951,15 +1971,16 @@ async def chat(m: types.Message):
             logging.exception("Roleplay LM call failed; using fallback reply")
             assistant_next = "Спасибо — давай продолжим. Можешь ответить ещё?"
 
+        save_msg(m.from_user.id, "user", m.text)
         save_msg(m.from_user.id, "assistant", assistant_next)
         kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
         await m.answer(assistant_next, reply_markup=kb)
         return
-    # Build short context (last ~6 turns)
+    # Build short context (last ~20 turns)
     with closing(db()) as conn:
         c = conn.cursor()
         c.execute(
-            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 6",
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 20",
             (m.from_user.id,)
         )
         rows = c.fetchall()
