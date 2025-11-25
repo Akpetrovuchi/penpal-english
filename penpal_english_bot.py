@@ -2220,6 +2220,20 @@ def get_grammar_set(user_id, level):
         
         return None
 
+def get_grammar_set_by_id(set_id):
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT id, sentences, wrong_index, explanation FROM grammar_sets WHERE id = %s", (set_id,))
+        row = c.fetchone()
+        if row:
+            return {
+                "id": row[0],
+                "sentences": row[1] if isinstance(row[1], list) else json.loads(row[1]),
+                "wrong_index": row[2],
+                "explanation": row[3]
+            }
+    return None
+
 def save_grammar_history(user_id, set_id, answer_index, is_correct):
     try:
         with closing(db()) as conn:
@@ -2269,8 +2283,9 @@ def grammar_answers_kb(set_id):
     ]
     return InlineKeyboardMarkup(inline_keyboard=[row, [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
 
-def grammar_post_game_kb(level):
+def grammar_post_game_kb(level, set_id):
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Посмотреть правило 🤓", callback_data=f"game:grammar:rule:{set_id}")],
         [InlineKeyboardButton("Следующий сет ➡️", callback_data=f"game:grammar:level:{level}")],
         [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
     ])
@@ -2491,6 +2506,10 @@ async def cb_grammar_answer(c: types.CallbackQuery):
     save_grammar_history(user_id, set_id, answer_idx, is_correct)
     
     # Prepare result message
+    sentences_text = ""
+    for i, s in enumerate(session["sentences"]):
+        sentences_text += f"{i+1}) {s}\n"
+
     if is_correct:
         res_header = "✅ Верно! Ты нашёл ошибку."
         res_body = f"{session['explanation']}"
@@ -2501,12 +2520,41 @@ async def cb_grammar_answer(c: types.CallbackQuery):
         res_body = f"Ошибка была в предложении №{display_idx}. {session['explanation']}"
         
     await c.message.edit_text(
-        f"{res_header}\n\n{res_body}",
-        reply_markup=grammar_post_game_kb(session["level"])
+        f"{sentences_text}\n{res_header}\n\n{res_body}",
+        reply_markup=grammar_post_game_kb(session["level"], set_id)
     )
     
     # Clear session
     USER_CHAT_SESSIONS.pop(user_id, None)
+
+@dp.callback_query_handler(lambda c: c.data.startswith("game:grammar:rule:"))
+async def cb_grammar_rule(c: types.CallbackQuery):
+    set_id = int(c.data.split(":")[-1])
+    user_id = c.from_user.id
+    log_event(user_id, "grammar_rule_requested", {"set_id": set_id})
+    
+    await c.answer("Спрашиваю у AI... 🤖")
+    
+    game_set = get_grammar_set_by_id(set_id)
+    if not game_set:
+        await c.message.answer("Не удалось найти задание.")
+        return
+
+    prompt = (
+        f"Explain the grammar rule for this error briefly (in Russian).\n"
+        f"Sentences: {game_set['sentences']}\n"
+        f"Explanation: {game_set['explanation']}\n"
+        "Keep it simple and educational."
+    )
+    
+    try:
+        explanation = await gpt_chat([
+            {"role": "system", "content": "You are a helpful English tutor. Explain grammar rules clearly in Russian."},
+            {"role": "user", "content": prompt}
+        ])
+        await c.message.answer(f"🤓 <b>Справка по правилу:</b>\n\n{explanation}")
+    except Exception:
+        await c.message.answer("Не удалось получить справку. Попробуй позже.")
 
 # --- Profile Handlers ---
 
