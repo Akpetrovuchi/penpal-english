@@ -167,34 +167,34 @@ def make_tasks_for_topic(topic):
     tasks = []
     if topic == "interview":
         tasks = [
-            {"id": 1, "text": "Introduce yourself briefly (name, current job or study)", "keywords": ["i am", "my name", "i'm", "i am a"]},
-            {"id": 2, "text": "Explain why you want this job", "keywords": ["because", "i want", "interested", "why i want"]},
-            {"id": 3, "text": "Describe one strength", "keywords": ["strength", "skill", "i can", "i am good at", "my strength"]},
-            {"id": 4, "text": "Ask a question about the company", "keywords": ["what", "company", "position", "role", "could you tell"]},
+            {"id": 1, "text": "Представься (имя, текущая работа или учёба)", "keywords": ["i am", "my name", "i'm", "i am a"]},
+            {"id": 2, "text": "Объясни, почему хочешь эту работу", "keywords": ["because", "i want", "interested", "why i want"]},
+            {"id": 3, "text": "Опиши одно своё сильное качество", "keywords": ["strength", "skill", "i can", "i am good at", "my strength"]},
+            {"id": 4, "text": "Задай вопрос о компании", "keywords": ["what", "company", "position", "role", "could you tell"]},
         ]
     elif topic == "restaurant":
         tasks = [
-            {"id": 1, "text": "Order a main dish and a drink", "keywords": ["i'll have", "i would like", "could i have", "i want"]},
-            {"id": 2, "text": "Ask about allergens or dietary restrictions", "keywords": ["allerg", "gluten", "vegan", "vegetarian", "contains"]},
-            {"id": 3, "text": "Ask for the bill", "keywords": ["check", "bill", "the bill", "can i pay", "pay"]},
+            {"id": 1, "text": "Закажи основное блюдо и напиток", "keywords": ["i'll have", "i would like", "could i have", "i want"]},
+            {"id": 2, "text": "Спроси про аллергены или диетические ограничения", "keywords": ["allerg", "gluten", "vegan", "vegetarian", "contains"]},
+            {"id": 3, "text": "Попроси счёт", "keywords": ["check", "bill", "the bill", "can i pay", "pay"]},
         ]
     elif topic == "raise":
         tasks = [
-            {"id": 1, "text": "Ask your manager for a raise and state your achievements", "keywords": ["raise", "salary", "i have achieved", "increase", "promotion", "i deserve"]},
-            {"id": 2, "text": "Propose a salary number or range", "keywords": ["salary", "per month", "per year", "amount", "rub", "$", "€"]},
-            {"id": 3, "text": "Ask about next steps", "keywords": ["next steps", "when will i know", "follow up"]},
+            {"id": 1, "text": "Попроси повышение и расскажи о своих достижениях", "keywords": ["raise", "salary", "i have achieved", "increase", "promotion", "i deserve"]},
+            {"id": 2, "text": "Предложи конкретную сумму или диапазон зарплаты", "keywords": ["salary", "per month", "per year", "amount", "rub", "$", "€"]},
+            {"id": 3, "text": "Спроси о следующих шагах", "keywords": ["next steps", "when will i know", "follow up"]},
         ]
     elif topic == "travel":
         tasks = [
-            {"id": 1, "text": "Ask the travel agent about price and available dates", "keywords": ["price", "cost", "how much", "when", "dates"]},
-            {"id": 2, "text": "Ask what services are included (hotel, transfers)", "keywords": ["hotel", "transfer", "included", "meals", "flight"]},
-            {"id": 3, "text": "Request a cheaper option or ask about discounts", "keywords": ["discount", "cheaper", "alternative", "other options"]},
+            {"id": 1, "text": "Спроси у турагента о цене и доступных датах", "keywords": ["price", "cost", "how much", "when", "dates"]},
+            {"id": 2, "text": "Уточни, что входит в стоимость (отель, трансферы)", "keywords": ["hotel", "transfer", "included", "meals", "flight"]},
+            {"id": 3, "text": "Попроси вариант дешевле или спроси о скидках", "keywords": ["discount", "cheaper", "alternative", "other options"]},
         ]
     else:  # free
         tasks = [
-            {"id": 1, "text": "Say hello and ask how the other person is doing", "keywords": ["hello", "hi", "how are you", "how's it going"]},
-            {"id": 2, "text": "Share something about your day", "keywords": ["today", "i went", "i saw", "my day", "i did"]},
-            {"id": 3, "text": "Ask a question back", "keywords": ["what about you", "and you", "do you", "tell me"]},
+            {"id": 1, "text": "Поздоровайся и спроси, как дела у собеседника", "keywords": ["hello", "hi", "how are you", "how's it going"]},
+            {"id": 2, "text": "Расскажи что-нибудь о своём дне", "keywords": ["today", "i went", "i saw", "my day", "i did"]},
+            {"id": 3, "text": "Задай вопрос в ответ", "keywords": ["what about you", "and you", "do you", "tell me"]},
         ]
     # mark all as not done
     for t in tasks:
@@ -384,6 +384,9 @@ User: "I has a dog"
 Assistant: "🔴 I has a dog → ✅ <b><u>I have a dog</u></b> — ошибка согласования подлежащего и сказуемого"
 
 Use at most 3 corrections per reply unless the user asks for full-sentence review.
+
+IMPORTANT: Do NOT correct punctuation (missing periods, commas), capitalization, or contractions (it's vs it is). Only correct actual grammar errors (tenses, articles, prepositions, word order) and vocabulary mistakes (wrong word choice).
+
 4) Respect user’s topics and tone.
 5) When asked to explain, use A2–B2-friendly English, bullet points, and one mini exercise.
 """
@@ -1166,9 +1169,8 @@ async def choose_chat_topic(c: types.CallbackQuery):
     # store assistant intro in session for context
     USER_CHAT_SESSIONS[user_id]["assistant_intro"] = assistant_intro
 
-    # Send first message: topic, rules and tasks
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести задания 🇷🇺", callback_data="translate:tasks"))
-    await c.message.edit_text(intro + "\n\nЗадания:\n" + tasks_list, reply_markup=kb)
+    # Send first message: topic, rules and tasks (tasks are already in Russian)
+    await c.message.edit_text(intro + "\n\nЗадания:\n" + tasks_list)
     # Send assistant intro as a separate message after 10 seconds without the word 'Bot' and with emoji
     try:
         asyncio.create_task(send_assistant_intro_delayed(c.from_user.id, assistant_intro, topic_key, delay=10))
@@ -1913,20 +1915,8 @@ async def chat(m: types.Message):
                 )
                 await m.answer(f"Отлично — задание выполнено: {t['text']}\n{expl}")
 
-        # check for completion criteria
-        if session["completed_count"] >= 2:
-            # topic completed (required tasks done)
-            log_event(
-                m.from_user.id,
-                "topic_completed",
-                {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
-            )
-            USER_CHAT_SESSIONS.pop(m.from_user.id, None)
-            await m.answer(
-                "Поздравляю — ты выполнил(а) необходимые задания! Возвращаю тебя в меню активности.",
-                reply_markup=mode_keyboard(),
-            )
-            return
+        # Check if this is the final message (all tasks done) - we'll handle completion after feedback
+        is_session_complete = session["completed_count"] >= 2
 
         if session["turns"] >= 20:
             # If user completed at least one task before timeout, mark topic as completed
@@ -1962,9 +1952,10 @@ async def chat(m: types.Message):
             user_msg = (
                 f"User reply: {m.text}\n\nTasks completed so far: {session['completed_count']} of 2.\n"
                 "Please do two things in one concise response:\n"
-                "1) If the user's English contains mistakes, show up to 3 inline corrections using this format (use HTML tags as shown):\n"
+                "1) If the user's English contains GRAMMAR or VOCABULARY mistakes, show up to 3 inline corrections using this format (use HTML tags as shown):\n"
                 "- 🔴 <i>original</i> → ✅ <b><u>corrected</u></b> — one short reason in English\n"
                 "Example: 🔴 <i>I has a dog</i> → ✅ <b><u>I have a dog</u></b> — subject-verb agreement\n"
+                "IMPORTANT: Do NOT correct punctuation (missing periods, commas), capitalization, or contractions (it's vs it is). Only correct actual grammar errors (tenses, articles, prepositions, word order) and vocabulary mistakes (wrong word choice).\n"
                 "2) Continue the roleplay as the persona (speak in English). First show corrections (if any), then a short assistant reply that continues the scene (one question or prompt). Keep the entire reply concise and in English."
             )
             
@@ -1984,6 +1975,21 @@ async def chat(m: types.Message):
         save_msg(m.from_user.id, "assistant", assistant_next)
         kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
         await m.answer(assistant_next, reply_markup=kb)
+        
+        # Now check if session is complete (after sending feedback) - show message only once
+        if is_session_complete and not session.get("completion_shown"):
+            session["completion_shown"] = True
+            log_event(
+                m.from_user.id,
+                "topic_completed",
+                {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
+            )
+            # Don't end session yet - let user choose to continue or go to menu
+            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+            await m.answer(
+                "Отличная работа! Ты выполнил задание. 🎉\nТы можешь продолжить общение или вернуться в меню.",
+                reply_markup=kb,
+            )
         return
     # Build short context (last ~20 turns)
     with closing(db()) as conn:
