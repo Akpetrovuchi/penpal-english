@@ -1673,8 +1673,8 @@ async def cmd_menu(m: types.Message):
 @dp.message_handler(commands=["subscribe", "premium"])
 async def cmd_subscribe(m: types.Message):
     save_msg(m.from_user.id, "user", "/subscribe")
-    session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, session_id, "command_used", {"command": "/subscribe"})
+    # session_id = get_session_id(m.from_user.id) # Not needed if we let log_event handle it
+    log_event(m.from_user.id, "command_used", {"command": "/subscribe"})
     if not PAYMENTS_PROVIDER_TOKEN:
         await m.answer("Платежи временно недоступны. Свяжитесь с поддержкой или попробуйте позже.")
         return
@@ -2579,6 +2579,7 @@ async def cb_mode_profile(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "profile_buy_unlimited")
 async def cb_profile_buy(c: types.CallbackQuery):
     update_streak(c.from_user.id)
+    log_event(c.from_user.id, "subscription_requested", {})
     await c.answer("Скоро здесь появится подписка 🙂", show_alert=True)
 
 @dp.callback_query_handler(lambda c: c.data == "profile_news_settings")
