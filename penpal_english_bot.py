@@ -1330,6 +1330,21 @@ async def finalize_word_selection(c: types.CallbackQuery):
     )
 
 
+@dp.callback_query_handler(lambda c: c.data == "news:continue")
+async def news_continue_dialog(c: types.CallbackQuery):
+    """User chose to continue discussing the article after completing 3 questions."""
+    user_id = c.from_user.id
+    await c.answer("Продолжаем! Просто пиши свои мысли 💬")
+    # Session stays active, user can keep chatting
+    await c.message.edit_text(
+        "Продолжаем обсуждение! Напиши, что ты думаешь о статье, или задай вопрос. 💬\n\n"
+        "Напиши <b>bye</b> или <b>пока</b>, чтобы вернуться в меню.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+    )
+
+
 @dp.callback_query_handler(lambda c: c.data.startswith("news:more"))
 async def more_news(c: types.CallbackQuery):
     user_id = c.from_user.id
@@ -2892,8 +2907,28 @@ async def handle_text_message(m: types.Message):
     # Save user message
     save_msg(user_id, "user", text)
     
-    # Check if user is in a roleplay session
+    # Check if user is in a session
     session = USER_CHAT_SESSIONS.get(user_id)
+    
+    # Handle "bye" command universally for any active session
+    if text.lower() in ["bye", "goodbye", "пока", "выход"]:
+        if session:
+            session_type = session.get("type")
+            if session_type == "news":
+                log_event(user_id, "reading_closed", {"cache_id": session.get("cache_id")})
+            elif session_type == "roleplay":
+                log_event(user_id, "chat_closed", {"topic": session.get("topic")})
+            USER_CHAT_SESSIONS.pop(user_id, None)
+            await m.answer(
+                "Хорошая работа! Возвращаю тебя в меню 🏠",
+                reply_markup=mode_keyboard()
+            )
+            return
+    
+    if session and session.get("type") == "news":
+        # Handle news discussion
+        await handle_news_discussion(m, session)
+        return
     
     if session and session.get("type") == "roleplay":
         # Handle roleplay conversation
@@ -2984,6 +3019,98 @@ async def handle_roleplay_message(m: types.Message, session: dict):
         kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
     
     await m.answer(full_response, reply_markup=kb)
+
+
+async def handle_news_discussion(m: types.Message, session: dict):
+    """Handle message in news discussion mode (after reading an article)."""
+    user_id = m.from_user.id
+    text = m.text.strip()
+    cache_id = session.get("cache_id")
+    
+    # Increment answer count
+    session["answers_count"] = session.get("answers_count", 0) + 1
+    answers_count = session["answers_count"]
+    
+    # Get article info for context
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT title, summary, questions FROM news_cache WHERE id=%s", (cache_id,))
+        row = cur.fetchone()
+    
+    if not row:
+        await m.answer("Не удалось найти статью. Попробуй /news для новой статьи.")
+        USER_CHAT_SESSIONS.pop(user_id, None)
+        return
+    
+    title, summary, questions_json = row
+    questions = json.loads(questions_json or "[]")
+    current_q_index = session.get("last_q_index", 0)
+    current_question = questions[current_q_index] if current_q_index < len(questions) else ""
+    
+    # Get user level
+    user = get_user(user_id)
+    level = user.get("level", "B1") if user else "B1"
+    
+    # Build context for GPT
+    system_prompt = f"""You are an English tutor discussing a news article with a student.
+Article title: {title}
+Article summary: {summary}
+Current question being discussed: {current_question}
+
+Your task:
+1. First, correct any grammar or vocabulary mistakes in the student's response (use format: 🔴 original → ✅ corrected — brief explanation in Russian)
+2. Then respond naturally to their answer, asking a follow-up question to keep the conversation going.
+3. Keep responses concise (2-3 sentences after corrections).
+4. Adapt your language to {level} level.
+
+IMPORTANT: Do NOT correct punctuation, capitalization, or contractions. Only correct actual grammar and vocabulary errors."""
+
+    # Get recent messages for context
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 10",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    for row in reversed(rows):
+        role = "assistant" if row[0] == "assistant" else "user"
+        messages.append({"role": role, "content": row[1]})
+    
+    # Generate response
+    try:
+        response = await gpt_chat(messages)
+    except Exception:
+        logging.exception("GPT chat failed in news discussion")
+        response = "Interesting point! Could you tell me more about what you think?"
+    
+    # Save assistant response
+    save_msg(user_id, "assistant", response)
+    
+    # Check if task is complete (3 answers)
+    if answers_count >= 3 and not session.get("completion_shown"):
+        session["completion_shown"] = True
+        log_event(user_id, "reading_completed", {"cache_id": cache_id})
+        
+        # Send feedback first
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+        await m.answer(response, reply_markup=kb)
+        
+        # Then send completion message
+        completion_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Продолжить диалог 💬", callback_data="news:continue")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+        await m.answer(
+            "🎉 <b>Отличная работа! Ты ответил(а) на 3 вопроса.</b>\n\nМожешь продолжить обсуждение статьи или вернуться в меню.",
+            reply_markup=completion_kb
+        )
+    else:
+        # Normal response with translate button
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+        await m.answer(response, reply_markup=kb)
 
 
 async def handle_general_chat(m: types.Message):
