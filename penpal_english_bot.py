@@ -2858,6 +2858,172 @@ async def handle_training_answer(c: types.CallbackQuery):
     session["current_index"] += 1
     await send_training_question(c.message, user_id)
 
+
+# --- Text message handler (must be last!) ---
+@dp.message_handler(content_types=types.ContentTypes.TEXT)
+async def handle_text_message(m: types.Message):
+    """
+    Handle all text messages that are not commands.
+    Processes:
+    1. Dictionary additions (word + "словарь" or /word)
+    2. Roleplay conversations
+    3. General chat with GPT
+    """
+    user_id = m.from_user.id
+    text = (m.text or "").strip()
+    
+    if not text:
+        return
+    
+    # Skip if it's a command (starts with /)
+    if text.startswith("/"):
+        # Commands are handled by specific handlers, but /word is special
+        if text.lower().startswith("/word"):
+            handled = await maybe_add_to_dictionary(m)
+            if handled:
+                return
+        return
+    
+    # Check for dictionary addition ("словарь" at end)
+    handled = await maybe_add_to_dictionary(m)
+    if handled:
+        return
+    
+    # Save user message
+    save_msg(user_id, "user", text)
+    
+    # Check if user is in a roleplay session
+    session = USER_CHAT_SESSIONS.get(user_id)
+    
+    if session and session.get("type") == "roleplay":
+        # Handle roleplay conversation
+        await handle_roleplay_message(m, session)
+        return
+    
+    # Default: general chat with GPT
+    await handle_general_chat(m)
+
+
+async def handle_roleplay_message(m: types.Message, session: dict):
+    """Handle message in roleplay mode."""
+    user_id = m.from_user.id
+    text = m.text.strip()
+    topic_key = session.get("topic", "free")
+    
+    # Check if user wants to end the session
+    if text.lower() in ["bye", "goodbye", "пока", "выход"]:
+        completed = session.get("completed_count", 0)
+        USER_CHAT_SESSIONS.pop(user_id, None)
+        await m.answer(
+            f"Диалог завершён! 👋\n\nВыполнено заданий: {completed}\n\nВозвращайся, когда захочешь попрактиковаться ещё!",
+            reply_markup=mode_keyboard()
+        )
+        return
+    
+    # Check task completion
+    tasks = session.get("tasks", [])
+    for task in tasks:
+        if not task.get("done"):
+            result = await check_task_completion(text, task["text"])
+            if result.get("done"):
+                task["done"] = True
+                session["completed_count"] = session.get("completed_count", 0) + 1
+                break
+    
+    # Increment turn counter
+    session["turns"] = session.get("turns", 0) + 1
+    
+    # Build context for GPT
+    persona = PERSONA_PROMPTS.get(topic_key, PERSONA_PROMPTS.get("free"))
+    
+    # Get recent messages from DB for context
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 10",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+    
+    messages = [{"role": "system", "content": persona + "\n\nKeep your responses concise (2-3 sentences). Correct any grammar mistakes the user makes, using the format: 🔴 original → ✅ corrected — brief explanation in Russian."}]
+    
+    # Add conversation history (reversed to chronological order)
+    for row in reversed(rows):
+        role = "assistant" if row[0] == "assistant" else "user"
+        messages.append({"role": role, "content": row[1]})
+    
+    # Generate response
+    try:
+        response = await gpt_chat(messages)
+    except Exception:
+        logging.exception("GPT chat failed in roleplay")
+        response = "Sorry, I'm having trouble responding right now. Please try again."
+    
+    # Save assistant response
+    save_msg(user_id, "assistant", response)
+    
+    # Check if 2 tasks completed
+    completed_count = session.get("completed_count", 0)
+    
+    # Build response with task status
+    pending_tasks = [t for t in tasks if not t.get("done")][:2]
+    
+    emoji = persona_emoji(topic_key)
+    full_response = f"{emoji} {response}"
+    
+    if completed_count >= 2:
+        # Session complete!
+        USER_CHAT_SESSIONS.pop(user_id, None)
+        full_response += f"\n\n🎉 <b>Отлично! Ты выполнил(а) 2 задания!</b>\n\nХочешь продолжить практику?"
+        kb = mode_keyboard()
+    else:
+        # Show remaining tasks
+        if pending_tasks:
+            tasks_text = "\n".join([f"• {t['text']}" for t in pending_tasks])
+            full_response += f"\n\n<i>Осталось:</i>\n{tasks_text}"
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    
+    await m.answer(full_response, reply_markup=kb)
+
+
+async def handle_general_chat(m: types.Message):
+    """Handle general chat (not in roleplay mode)."""
+    user_id = m.from_user.id
+    
+    # Get user info for context
+    user = get_user(user_id)
+    level = user.get("level", "B1") if user else "B1"
+    
+    # Get recent messages from DB
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 20",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+    
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    
+    # Add conversation history (reversed to chronological order)
+    for row in reversed(rows):
+        role = "assistant" if row[0] == "assistant" else "user"
+        messages.append({"role": role, "content": row[1]})
+    
+    # Generate response
+    try:
+        response = await gpt_chat(messages)
+    except Exception:
+        logging.exception("GPT chat failed")
+        response = "Sorry, I'm having trouble right now. Try /news for a fresh article or /menu for options. 🤖"
+    
+    # Save assistant response
+    save_msg(user_id, "assistant", response)
+    
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    await m.answer(response, reply_markup=kb)
+
+
 if __name__ == '__main__':
     # Ensure game tables exist
     init_game_tables()
