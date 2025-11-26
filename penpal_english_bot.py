@@ -792,6 +792,7 @@ def mode_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton("Обсудить новость 📰", callback_data="mode:news")],
             [InlineKeyboardButton("Разговорная практика 💬", callback_data="mode:chat")],
+            [InlineKeyboardButton("Тренировать слова 🧠", callback_data="mode:train_words")],
             [InlineKeyboardButton("Играть 🎮", callback_data="mode:games")],
             [InlineKeyboardButton("👤 Профиль", callback_data="mode:profile")],
         ]
@@ -1080,7 +1081,7 @@ async def choose_level(c: types.CallbackQuery):
     )
 
 
-@dp.callback_query_handler(lambda c: c.data.startswith("mode:") and c.data != "mode:profile")
+@dp.callback_query_handler(lambda c: c.data.startswith("mode:") and c.data not in ["mode:profile", "mode:train_words"])
 async def choose_mode(c: types.CallbackQuery):
     log_event(c.from_user.id, "mode_selected", {"mode": c.data.split(":")[1]})
     save_msg(c.from_user.id, "user", c.data)
@@ -2595,11 +2596,6 @@ async def cb_profile_news(c: types.CallbackQuery):
         reply_markup=topic_keyboard(existing),
     )
 
-@dp.callback_query_handler(lambda c: c.data == "profile_back_menu")
-async def cb_profile_back(c: types.CallbackQuery):
-    update_streak(c.from_user.id)
-    await c.answer()
-    await c.message.edit_text("Меню активности — выбери, что хочешь сделать:", reply_markup=mode_keyboard())
 
 def init_game_tables():
     try:
@@ -2712,62 +2708,84 @@ async def maybe_add_to_dictionary(m: types.Message):
     if not text:
         return False
         
-    # Check for "словарь" trigger
-    # We look for it at the end, case-insensitive
+    # Check for triggers: "словарь" at end OR "/word" at start
     lower_text = text.lower()
-    trigger = "словарь"
+    content = None
     
-    if not lower_text.endswith(trigger):
+    if lower_text.endswith("словарь"):
+        content = text[:-7].strip()
+    elif lower_text.startswith("/word"):
+        content = text[5:].strip()
+        
+    if content is None:
         return False
         
-    # Extract the word/phrase
-    # "apple словарь" -> "apple"
-    # "словарь" -> empty
-    
-    content = text[:-len(trigger)].strip()
-    
     user_id = m.from_user.id
     
     if not content:
-        # User just sent "словарь"
-        await m.answer("Напиши слово перед «словарь», например: apple словарь 🙂")
+        await m.answer("Напиши слово, например: apple словарь или /word apple 🙂")
         return True
         
-    # Try to add to DB
-    added = False
+    # Check existence first
+    exists = False
     try:
         with closing(db()) as conn:
             c = conn.cursor()
-            # Check existence
             c.execute("SELECT 1 FROM user_dictionary WHERE user_id=%s AND word=%s", (user_id, content))
             if c.fetchone():
-                await m.answer(f"ℹ️ «{content}» уже есть в словаре")
-                log_event(user_id, "dictionary_add_attempt", {"word": content, "success": False, "reason": "duplicate"})
-            else:
-                # Check if created_at column exists, if not, don't use it or migrate.
-                # For simplicity, let's try inserting without created_at if it fails, or just assume schema is correct.
-                # The error log showed: column "created_at" of relation "user_dictionary" does not exist.
-                # So we should remove created_at from the query.
-                c.execute("INSERT INTO user_dictionary (user_id, word) VALUES (%s, %s)", (user_id, content))
-                conn.commit()
-                added = True
-                log_event(user_id, "dictionary_add_attempt", {"word": content, "success": True})
+                exists = True
+    except Exception as e:
+        logging.error(f"Dictionary check error: {e}")
+        return False
+
+    if exists:
+        await m.answer(f"ℹ️ «{content}» уже есть в словаре")
+        log_event(user_id, "word_dictionary", {"word": content, "success": False, "reason": "duplicate"})
+        return True
+
+    # If not exists, get translation first
+    wait_msg = await m.answer(f"⏳ Ищу значение для «{content}»...")
+    
+    definition = ""
+    translation = ""
+    
+    try:
+        response_text = await gpt_chat([
+            {"role": "system", "content": "You are a helpful dictionary assistant. Return a JSON object with two keys: 'definition' (a brief definition in English) and 'translation' (the Russian translation of the word/phrase)."},
+            {"role": "user", "content": content}
+        ])
+        
+        # Parse JSON
+        clean_text = response_text.replace("```json", "").replace("```", "").strip()
+        data = json.loads(clean_text)
+        
+        definition = data.get("definition", "")
+        translation = data.get("translation", "")
+        
+    except Exception as e:
+        logging.error(f"GPT dictionary error: {e}")
+        await wait_msg.edit_text("❌ Не удалось найти перевод. Попробуй позже.")
+        return True
+
+    # Now insert into DB with translation (only Russian translation)
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("INSERT INTO user_dictionary (user_id, word, translation) VALUES (%s, %s, %s)", (user_id, content, translation))
+            conn.commit()
+            
+        log_event(user_id, "word_dictionary", {"word": content, "success": True})
+        await wait_msg.delete()
+        
+        display_text = f"🇬🇧 Definition: {definition}\n🇷🇺 Перевод: {translation}"
+        await m.answer(f"✅ <b>{content}</b> добавлено в словарь.\n\n{display_text}")
+        
     except Exception as e:
         logging.error(f"Dictionary insert error: {e}")
         log_event(user_id, "error", {"where": "dictionary_insert", "msg": str(e)[:200]})
+        await wait_msg.edit_text("❌ Ошибка при сохранении в базу данных.")
         
-    if added:
-        # Generate explanation
-        await m.answer(f"✅ «{content}» добавлено в словарь. Ищу значение... ⏳")
-        try:
-            explanation = await gpt_chat([
-                {"role": "system", "content": "You are a helpful dictionary assistant. Provide a brief definition and translation for the given word/phrase in Russian. Format: '🇬🇧 Definition: ...\n🇷🇺 Перевод: ...'"},
-                {"role": "user", "content": content}
-            ])
-            await m.answer(f"📖 <b>{content}</b>\n\n{explanation}")
-        except Exception:
-            # If fails, just ignore
-            pass
+
 
     return True # Action taken
 
@@ -2810,6 +2828,183 @@ async def show_profile(user_id, messageable):
         await messageable.answer(text, reply_markup=profile_keyboard())
 
     log_event(user_id, "profile_opened", {})
+
+# --- Word Training Logic ---
+
+@dp.callback_query_handler(lambda c: c.data == "mode:train_words")
+async def start_word_training(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    log_event(user_id, "word_training_start", {})
+    
+    # Fetch words
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT word, translation FROM user_dictionary WHERE user_id=%s AND translation IS NOT NULL AND translation != ''", (user_id,))
+        rows = cur.fetchall()
+        
+    if len(rows) < 3:
+        await c.answer()
+        text = (
+            "Для тренировки нужно минимум 3 слова в словаре 📚\n\n"
+            "Добавь слова:\n"
+            "1. Напиши <code>apple словарь</code>\n"
+            "2. Или используй команду <code>/word apple</code>"
+        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+        await c.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+        return
+
+    # Prepare session
+    # We need 6 questions.
+    # Q1-3: En -> Ru (Select translation)
+    # Q4-6: Ru -> En (Select word)
+    
+    import random
+    random.shuffle(rows)
+    
+    # If we have fewer than 6 words, we reuse them.
+    # We need a pool of words for questions.
+    # Let's pick 6 question items (word, translation).
+    
+    question_items = []
+    while len(question_items) < 6:
+        question_items.extend(rows)
+    question_items = question_items[:6]
+    random.shuffle(question_items)
+    
+    questions = []
+    
+    for i, (word, trans) in enumerate(question_items):
+        # First 3: En -> Ru
+        if i < 3:
+            q_type = "en_ru"
+            question_text = word
+            correct_answer = trans
+            # Distractors: other translations
+            distractors = [r[1] for r in rows if r[1] != trans]
+        else:
+            # Next 3: Ru -> En
+            q_type = "ru_en"
+            question_text = trans
+            correct_answer = word
+            # Distractors: other words
+            distractors = [r[0] for r in rows if r[0] != word]
+            
+        # Pick 2 random distractors (or fewer if not enough)
+        if len(distractors) > 2:
+            opts = random.sample(distractors, 2)
+        else:
+            opts = distractors
+            
+        options = opts + [correct_answer]
+        random.shuffle(options)
+        
+        questions.append({
+            "type": q_type,
+            "question": question_text,
+            "correct": correct_answer,
+            "options": options
+        })
+        
+    USER_CHAT_SESSIONS[user_id] = {
+        "type": "word_training",
+        "questions": questions,
+        "current_index": 0,
+        "score": 0
+    }
+    
+    await c.answer()
+    await send_training_question(c.message, user_id)
+
+
+async def send_training_question(message: types.Message, user_id: int):
+    session = USER_CHAT_SESSIONS.get(user_id)
+    if not session or session.get("type") != "word_training":
+        await message.edit_text("Ошибка сессии. Попробуй заново.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]]))
+        return
+        
+    idx = session["current_index"]
+    questions = session["questions"]
+    
+    if idx >= len(questions):
+        # Finish
+        score = session["score"]
+        total = len(questions)
+        
+        praise = "Отличная работа! 🎉"
+        if score == total:
+            praise = "Идеально! 🏆 Ты молодец!"
+        elif score > total / 2:
+            praise = "Хороший результат! 👍"
+            
+        text = (
+            f"{praise}\n\n"
+            f"Результат: <b>{score} из {total}</b>"
+        )
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Тренировать еще 🧠", callback_data="mode:train_words")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+        
+        await message.edit_text(text, reply_markup=kb)
+        log_event(user_id, "word_training_completed", {"score": score, "total": total})
+        return
+        
+    q = questions[idx]
+    q_text = q["question"]
+    
+    # Title based on type
+    if q["type"] == "en_ru":
+        title = f"Как переводится: <b>{q_text}</b>?"
+    else:
+        title = f"Как будет на английском: <b>{q_text}</b>?"
+        
+    kb = InlineKeyboardMarkup(row_width=1)
+    for opt in q["options"]:
+        # We pass the index of the option in the list to verify answer? 
+        # Or just pass "correct" / "incorrect"?
+        # Passing full text might be too long for callback_data (64 bytes limit).
+        # Let's pass 1 if correct, 0 if incorrect.
+        is_correct = "1" if opt == q["correct"] else "0"
+        # We need to handle potential duplicates in options if dictionary is small?
+        # Logic above ensures options are unique if source rows are unique.
+        
+        # Truncate option text for button label if too long
+        label = opt[:30] + "..." if len(opt) > 30 else opt
+        kb.add(InlineKeyboardButton(label, callback_data=f"train:ans:{is_correct}"))
+        
+    kb.add(InlineKeyboardButton("Меню 🏠", callback_data="menu:main"))
+    
+    step_info = f"Вопрос {idx + 1} из {len(questions)}"
+    full_text = f"{step_info}\n\n{title}"
+    
+    await message.edit_text(full_text, reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("train:ans:"))
+async def handle_training_answer(c: types.CallbackQuery):
+    user_id = c.from_user.id
+    session = USER_CHAT_SESSIONS.get(user_id)
+    if not session or session.get("type") != "word_training":
+        await c.answer("Сессия истекла.", show_alert=True)
+        await c.message.edit_text("Сессия истекла.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]]))
+        return
+        
+    is_correct = c.data.split(":")[2] == "1"
+    
+    if is_correct:
+        session["score"] += 1
+        await c.answer("Верно! ✅")
+    else:
+        # Show correct answer? 
+        # For now just move on, maybe show alert
+        q = session["questions"][session["current_index"]]
+        correct = q["correct"]
+        await c.answer(f"Неверно ❌\nПравильно: {correct}", show_alert=True)
+        
+    session["current_index"] += 1
+    await send_training_question(c.message, user_id)
 
 if __name__ == '__main__':
     # Ensure game tables exist
