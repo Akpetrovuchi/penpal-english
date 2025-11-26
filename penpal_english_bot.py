@@ -3006,19 +3006,27 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     emoji = persona_emoji(topic_key)
     full_response = f"{emoji} {response}"
     
-    if completed_count >= 2:
-        # Session complete!
-        USER_CHAT_SESSIONS.pop(user_id, None)
-        full_response += f"\n\n🎉 <b>Отлично! Ты выполнил(а) 2 задания!</b>\n\nХочешь продолжить практику?"
-        kb = mode_keyboard()
-    else:
-        # Show remaining tasks
-        if pending_tasks:
-            tasks_text = "\n".join([f"• {t['text']}" for t in pending_tasks])
-            full_response += f"\n\n<i>Осталось:</i>\n{tasks_text}"
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    # Always send the GPT response first
+    if pending_tasks and completed_count < 2:
+        tasks_text = "\n".join([f"• {t['text']}" for t in pending_tasks])
+        full_response += f"\n\n<i>Осталось:</i>\n{tasks_text}"
     
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
     await m.answer(full_response, reply_markup=kb)
+    
+    # Then send completion message if 2 tasks done (only once)
+    if completed_count >= 2 and not session.get("completion_shown"):
+        session["completion_shown"] = True
+        log_event(user_id, "topic_completed", {"topic": topic_key, "turns": session.get("turns", 0)})
+        
+        completion_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+        await m.answer(
+            "🎉 <b>Отличная работа! Ты выполнил(а) 2 задания.</b>\n\n"
+            "Ты можешь продолжить диалог или вернуться в меню.",
+            reply_markup=completion_kb
+        )
 
 
 async def handle_news_discussion(m: types.Message, session: dict):
@@ -3089,28 +3097,23 @@ IMPORTANT: Do NOT correct punctuation, capitalization, or contractions. Only cor
     # Save assistant response
     save_msg(user_id, "assistant", response)
     
-    # Check if task is complete (3 answers)
+    # Always send the GPT response first
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    await m.answer(response, reply_markup=kb)
+    
+    # Then send completion message if 3 answers done (only once)
     if answers_count >= 3 and not session.get("completion_shown"):
         session["completion_shown"] = True
         log_event(user_id, "reading_completed", {"cache_id": cache_id})
         
-        # Send feedback first
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
-        await m.answer(response, reply_markup=kb)
-        
-        # Then send completion message
         completion_kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("Продолжить диалог 💬", callback_data="news:continue")],
             [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
         ])
         await m.answer(
-            "🎉 <b>Отличная работа! Ты ответил(а) на 3 вопроса.</b>\n\nМожешь продолжить обсуждение статьи или вернуться в меню.",
+            "🎉 <b>Отличная работа! Ты ответил(а) на 3 вопроса.</b>\n\n"
+            "Ты можешь продолжить диалог или вернуться в меню.",
             reply_markup=completion_kb
         )
-    else:
-        # Normal response with translate button
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
-        await m.answer(response, reply_markup=kb)
 
 
 async def handle_general_chat(m: types.Message):
