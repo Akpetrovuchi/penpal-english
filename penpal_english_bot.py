@@ -465,47 +465,6 @@ def reset_daily_sent(user_id):
         c = conn.cursor()
         c.execute("UPDATE users SET daily_sent = 0 WHERE id=%s", (user_id,))
         conn.commit()
-
-def update_streak(user_id):
-    """
-    Updates user streak based on last_active_date.
-    Should be called on every user interaction.
-    """
-    today = date.today()
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("SELECT streak_count, last_active_date, max_streak FROM users WHERE id=%s", (user_id,))
-        row = c.fetchone()
-        
-        if not row:
-            return # User not found or not initialized
-
-        streak_count = row[0] or 0
-        last_active = row[1] # date object or None
-        max_streak = row[2] or 0
-        
-        new_streak = streak_count
-        new_max = max_streak
-        
-        if last_active is None:
-            new_streak = 1
-            new_max = max(new_max, 1)
-        elif last_active == today:
-            pass # Already active today
-        elif last_active == today - timedelta(days=1):
-            new_streak += 1
-            new_max = max(new_max, new_streak)
-        elif last_active < today - timedelta(days=1):
-            new_streak = 1 # Streak broken
-            
-        # Update DB
-        c.execute("""
-            UPDATE users 
-            SET streak_count=%s, last_active_date=%s, max_streak=%s 
-            WHERE id=%s
-        """, (new_streak, today, new_max, user_id))
-        conn.commit()
-
 FREE_ARTICLE_LIMIT = 3
 
 def get_user_article_count(user_id):
@@ -665,23 +624,44 @@ def get_all_users_for_daily():
 def save_msg(user_id, role, content):
     with closing(db()) as conn:
         now = datetime.utcnow().isoformat()
+        today = date.today()
         c = conn.cursor()
         c.execute(
             "INSERT INTO messages(user_id, role, content, created_at) VALUES(%s, %s, %s, %s)",
             (user_id, role, content, now),
         )
-        # update last interaction on users table
-        try:
-            c.execute("UPDATE users SET last_interaction=%s WHERE id=%s", (now, user_id))
-        except Exception:
-            logging.exception("Failed to update last_interaction")
-
-        # Update streak on every interaction
-        try:
-            update_streak(user_id)
-        except Exception:
-            logging.exception("Failed to auto-update streak")
-
+        # Update last_interaction AND streak in one query (only for user messages)
+        if role == "user":
+            try:
+                c.execute("""
+                    UPDATE users 
+                    SET last_interaction = %s,
+                        streak_count = CASE 
+                            WHEN last_active_date IS NULL THEN 1
+                            WHEN last_active_date = %s THEN COALESCE(streak_count, 0)
+                            WHEN last_active_date = %s - INTERVAL '1 day' THEN COALESCE(streak_count, 0) + 1
+                            ELSE 1
+                        END,
+                        max_streak = GREATEST(
+                            COALESCE(max_streak, 0),
+                            CASE 
+                                WHEN last_active_date IS NULL THEN 1
+                                WHEN last_active_date = %s THEN COALESCE(streak_count, 0)
+                                WHEN last_active_date = %s - INTERVAL '1 day' THEN COALESCE(streak_count, 0) + 1
+                                ELSE 1
+                            END
+                        ),
+                        last_active_date = %s
+                    WHERE id = %s
+                """, (now, today, today, today, today, today, user_id))
+            except Exception:
+                logging.exception("Failed to update last_interaction and streak")
+        else:
+            # For assistant messages, just update last_interaction
+            try:
+                c.execute("UPDATE users SET last_interaction=%s WHERE id=%s", (now, user_id))
+            except Exception:
+                logging.exception("Failed to update last_interaction")
         # keep last 30
         c.execute(
             "DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 30) AND user_id=%s",
@@ -2525,6 +2505,49 @@ def init_game_tables():
         logging.error(f"Failed to init game tables: {e}")
 
 # Helper functions for Profile, Streak, and Dictionary features
+
+def update_streak(user_id):
+    """
+    Updates user streak based on last_active_date.
+    Called from callback handlers that don't use save_msg.
+    Skips DB write if already updated today.
+    """
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT streak_count, last_active_date, max_streak FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        
+        if not row:
+            return # User not found or not initialized
+
+        streak_count = row[0] or 0
+        last_active = row[1] # date object or None
+        max_streak = row[2] or 0
+        
+        # Skip if already updated today
+        if last_active == today:
+            return
+        
+        new_streak = streak_count
+        new_max = max_streak
+        
+        if last_active is None:
+            new_streak = 1
+            new_max = max(new_max, 1)
+        elif last_active == today - timedelta(days=1):
+            new_streak += 1
+            new_max = max(new_max, new_streak)
+        else:
+            new_streak = 1 # Streak broken
+            
+        # Update DB
+        c.execute("""
+            UPDATE users 
+            SET streak_count=%s, last_active_date=%s, max_streak=%s 
+            WHERE id=%s
+        """, (new_streak, today, new_max, user_id))
+        conn.commit()
 
 async def maybe_add_to_dictionary(m: types.Message):
     """
