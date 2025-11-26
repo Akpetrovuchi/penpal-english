@@ -1845,187 +1845,6 @@ async def translate_message(c: types.CallbackQuery):
     await bot.send_message(user_id, f"<b>Перевод:</b>\n{translated}")
 
 
-@dp.message_handler()
-async def chat(m: types.Message):
-    log_event(m.from_user.id, "user_message", {"text": m.text})
-
-    # Update streak on any message
-    update_streak(m.from_user.id)
-
-    # Check for dictionary trigger
-    if await maybe_add_to_dictionary(m):
-        # If dictionary action was taken, do not continue to chat response
-        return
-
-    user = get_user(m.from_user.id)
-    if not user or not user.get("level"):
-        save_user(m.from_user.id, m.from_user.username or "")
-        await m.answer("Let’s set your level first:", reply_markup=level_keyboard())
-        return
-    # If there is an active chat session with tasks, handle it here
-    session = USER_CHAT_SESSIONS.get(m.from_user.id)
-
-    # Unified "bye" check for both roleplay and news modes
-    if session:
-        text = (m.text or "").lower()
-        if "bye" in text or "bye 👋" in text:
-            session_type = session.get("type", "roleplay")
-            if session_type == "roleplay":
-                log_event(m.from_user.id, "chat_closed", {"topic": session.get("topic")})
-                # If user completed at least one task, consider topic completed as well
-                if session.get("completed_count", 0) > 0:
-                    log_event(
-                        m.from_user.id,
-                        "topic_completed",
-                        {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
-                    )
-            elif session_type == "news":
-                log_event(m.from_user.id, "reading_closed", {"cache_id": session.get("cache_id")})
-
-            USER_CHAT_SESSIONS.pop(m.from_user.id, None)
-            await m.answer("Хорошая работа! Возвращаю тебя в меню", reply_markup=mode_keyboard())
-            return
-
-    if session and session.get("type", "roleplay") == "roleplay":
-        session["turns"] += 1
-        text = (m.text or "").lower()
-        
-        # check each task for completion using the language model
-        tasks = session.get("tasks", [])
-        newly_completed = []
-        for t in tasks:
-            if not t.get("done"):
-                try:
-                    res = await check_task_completion(m.text or "", t.get("text", ""))
-                    if res.get("done"):
-                        t["done"] = True
-                        session["completed_count"] += 1
-                        newly_completed.append({"task": t, "explanation": res.get("explanation")})
-                except Exception:
-                    logging.exception("Error while checking task completion")
-
-        # send feedback for completed tasks and log events
-        if newly_completed:
-            for item in newly_completed:
-                t = item.get("task")
-                expl = item.get("explanation") or ""
-                log_event(
-                    m.from_user.id,
-                    "task_completed",
-                    {"topic": session.get("topic"), "task_id": t.get("id"), "task_text": t.get("text")},
-                )
-                await m.answer(f"Отлично — задание выполнено: {t['text']}\n{expl}")
-
-        # Check if this is the final message (all tasks done) - we'll handle completion after feedback
-        is_session_complete = session["completed_count"] >= 2
-
-        if session["turns"] >= 20:
-            # If user completed at least one task before timeout, mark topic as completed
-            if session.get("completed_count", 0) > 0:
-                log_event(
-                    m.from_user.id,
-                    "topic_completed",
-                    {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
-                )
-            USER_CHAT_SESSIONS.pop(m.from_user.id, None)
-            await m.answer(
-                "Диалог окончен (лимит реплик достигнут). Возвращаю тебя в меню активности.",
-                reply_markup=mode_keyboard(),
-            )
-            return
-
-        # Otherwise, ask the language model to (a) provide brief corrections, (b) continue the roleplay persona
-        persona_intro = session.get("assistant_intro", PERSONA_PROMPTS.get(session.get("topic"), "You are a friendly conversational partner."))
-        
-        # Fetch history for context
-        with closing(db()) as conn:
-            c = conn.cursor()
-            c.execute(
-                "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 20",
-                (m.from_user.id,)
-            )
-            rows = c.fetchall()
-        history = [{"role": r, "content": ct} for (r, ct) in rows[::-1]]
-
-        try:
-            # Build messages: system=persona instruction, history, user=the user's reply + short task status
-            sys_msg = persona_intro
-            user_msg = (
-                f"User reply: {m.text}\n\nTasks completed so far: {session['completed_count']} of 2.\n"
-                "Please do two things in one concise response:\n"
-                "1) If the user's English contains GRAMMAR or VOCABULARY mistakes, show up to 3 inline corrections using this format (use HTML tags as shown):\n"
-                "- 🔴 <i>original</i> → ✅ <b><u>corrected</u></b> — one short reason in English\n"
-                "Example: 🔴 <i>I has a dog</i> → ✅ <b><u>I have a dog</u></b> — subject-verb agreement\n"
-                "IMPORTANT: Do NOT correct punctuation (missing periods, commas), capitalization, or contractions (it's vs it is). Only correct actual grammar errors (tenses, articles, prepositions, word order) and vocabulary mistakes (wrong word choice).\n"
-                "2) Continue the roleplay as the persona (speak in English). First show corrections (if any), then a short assistant reply that continues the scene (one question or prompt). Keep the entire reply concise and in English."
-            )
-            
-            messages = [{"role": "system", "content": sys_msg}] + history + [{"role": "user", "content": user_msg}]
-
-            resp = openai.ChatCompletion.create(
-                model="gpt-4o-mini",
-                messages=messages,
-                temperature=0.5,
-            )
-            assistant_next = resp.choices[0].message["content"]
-        except Exception:
-            logging.exception("Roleplay LM call failed; using fallback reply")
-            assistant_next = "Спасибо — давай продолжим. Можешь ответить ещё?"
-
-        save_msg(m.from_user.id, "user", m.text)
-        save_msg(m.from_user.id, "assistant", assistant_next)
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
-        await m.answer(assistant_next, reply_markup=kb)
-        
-        # Now check if session is complete (after sending feedback) - show message only once
-        if is_session_complete and not session.get("completion_shown"):
-            session["completion_shown"] = True
-            log_event(
-                m.from_user.id,
-                "topic_completed",
-                {"topic": session.get("topic"), "completed_tasks": session.get("completed_count")},
-            )
-            # Don't end session yet - let user choose to continue or go to menu
-            kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
-            await m.answer(
-                "Отличная работа! Ты выполнил задание. 🎉\nТы можешь продолжить общение или вернуться в меню.",
-                reply_markup=kb,
-            )
-        return
-    # Build short context (last ~20 turns)
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute(
-            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 20",
-            (m.from_user.id,)
-        )
-        rows = c.fetchall()
-    history = [{"role": r, "content": ct} for (r, ct) in rows[::-1]]
-    messages = (
-        [{"role": "system", "content": SYSTEM_PROMPT}]
-        + history
-        + [{"role": "user", "content": m.text}]
-    )
-    save_msg(m.from_user.id, "user", m.text)
-    session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, "user_message", {"text": m.text}, session_id=session_id)
-    reply = await gpt_chat(messages)
-    # No longer mining 'Useful:' phrases. Corrections are handled by the assistant per SYSTEM_PROMPT.
-    save_msg(m.from_user.id, "assistant", reply)
-    log_event(m.from_user.id, "assistant_message", {"text": reply}, session_id=session_id)
-    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
-    await m.answer(reply, reply_markup=kb)
-
-    # Check for News completion
-    if session and session.get("type") == "news":
-        session["answers_count"] += 1
-        # Trigger completion if user has answered at least 3 times
-        if session["answers_count"] >= 3:
-             log_event(m.from_user.id, "reading_completed", {"cache_id": session.get("cache_id")})
-             kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
-             await m.answer("Отличная работа! Ты выполнил задание. 🎉\nТы можешь продолжить общение или вернуться в меню.", reply_markup=kb)
-             USER_CHAT_SESSIONS.pop(m.from_user.id, None)
-
 # --- Truth/Lie Game Logic ---
 
 TRUTH_LIE_TOPICS = {
@@ -2806,7 +2625,8 @@ def profile_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton("Приобрести бесконечный доступ 💎", callback_data="profile_buy_unlimited")],
         [InlineKeyboardButton("Настроить темы новостей 🗞", callback_data="profile_news_settings")],
-        [InlineKeyboardButton("Меню ◀️", callback_data="profile_back_menu")]
+        [InlineKeyboardButton("Написать в поддержку 🆘", url="https://t.me/artyhere")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
     ])
 
 async def show_profile(user_id, messageable):
@@ -3010,6 +2830,4 @@ async def handle_training_answer(c: types.CallbackQuery):
 if __name__ == '__main__':
     # Ensure game tables exist
     init_game_tables()
-    # Populate game sets if needed
-    populate_game_sets()
     executor.start_polling(dp, skip_updates=True)
