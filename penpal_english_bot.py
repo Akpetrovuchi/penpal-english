@@ -1716,38 +1716,18 @@ async def cmd_menu(m: types.Message):
 @dp.message_handler(commands=["subscribe", "premium"])
 async def cmd_subscribe(m: types.Message):
     save_msg(m.from_user.id, "user", "/subscribe")
-    # session_id = get_session_id(m.from_user.id) # Not needed if we let log_event handle it
-    log_event(m.from_user.id, "command_used", {"command": "/subscribe"})
-    if not PAYMENTS_PROVIDER_TOKEN:
-        await m.answer("Платежи временно недоступны. Свяжитесь с поддержкой или попробуйте позже.")
-        return
-    # Build prices in minor units (kopeks/cents)
-    try:
-        amount_minor = SUBSCRIPTION_PRICE * 100
-    except Exception:
-        amount_minor = 29900
-    prices = [LabeledPrice(label="Подписка на месяц", amount=amount_minor)]
-    title = "Подписка PenPal English"
-    description = "Неограниченный доступ к статьям и тренировкам на месяц."
-    payload = "subscription-month-1"
-    start_parameter = "subscribe"
-    try:
-        await bot.send_invoice(
-            m.chat.id,
-            title=title,
-            description=description,
-            provider_token=PAYMENTS_PROVIDER_TOKEN,
-            currency=SUBSCRIPTION_CURRENCY,
-            prices=prices,
-            start_parameter=start_parameter,
-            payload=payload,
-            need_name=False,
-            need_email=False,
-            is_flexible=False,
-        )
-    except Exception:
-        logging.exception("Failed to send invoice")
-        await m.answer("Не удалось сформировать счёт. Попробуйте позже.")
+    log_event(m.from_user.id, "subscription_screen_opened", {"source": "command"})
+    
+    text = (
+        "<b>Безлимитный доступ 💎</b>\n\n"
+        "✅ Безлимитные разборы грамматики и лексики с Максом\n"
+        "✅ Каждый день свежие новости на любые темы\n"
+        "✅ Неограниченные сеты игры «Исправь грамматику»\n"
+        "✅ Голосовой режим (скоро)\n\n"
+        "Выбери подходящий тариф:"
+    )
+    
+    await m.answer(text, reply_markup=subscription_keyboard())
 
 
 @dp.callback_query_handler(lambda c: c.data == "pay:subscribe")
@@ -2438,11 +2418,37 @@ async def cb_mode_profile(c: types.CallbackQuery):
     await c.answer()
     await show_profile(c.from_user.id, c.message)
 
+def subscription_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("500₽ в месяц", callback_data="pay:monthly")],
+        [InlineKeyboardButton("1499₽ за год", callback_data="pay:yearly")],
+        [InlineKeyboardButton("Назад ↩️", callback_data="mode:profile")]
+    ])
+
+
 @dp.callback_query_handler(lambda c: c.data == "profile_buy_unlimited")
 async def cb_profile_buy(c: types.CallbackQuery):
     update_streak(c.from_user.id)
-    log_event(c.from_user.id, "subscription_requested", {})
-    await c.answer("Скоро здесь появится подписка 🙂", show_alert=True)
+    log_event(c.from_user.id, "subscription_screen_opened", {})
+    await c.answer()
+    
+    text = (
+        "<b>Безлимитный доступ 💎</b>\n\n"
+        "✅ Безлимитные разборы грамматики и лексики с Максом\n"
+        "✅ Каждый день свежие новости на любые темы\n"
+        "✅ Неограниченные сеты игры «Исправь грамматику»\n"
+        "✅ Голосовой режим (скоро)\n\n"
+        "Выбери подходящий тариф:"
+    )
+    
+    await c.message.edit_text(text, reply_markup=subscription_keyboard())
+
+
+@dp.callback_query_handler(lambda c: c.data in ["pay:monthly", "pay:yearly"])
+async def cb_pay_plan(c: types.CallbackQuery):
+    plan = c.data.split(":")[1]
+    log_event(c.from_user.id, "subscription_plan_selected", {"plan": plan})
+    await c.answer("Оплата скоро будет доступна 🙂", show_alert=True)
 
 @dp.callback_query_handler(lambda c: c.data == "profile_news_settings")
 async def cb_profile_news(c: types.CallbackQuery):
