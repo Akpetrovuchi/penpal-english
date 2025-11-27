@@ -466,6 +466,8 @@ def reset_daily_sent(user_id):
         c.execute("UPDATE users SET daily_sent = 0 WHERE id=%s", (user_id,))
         conn.commit()
 FREE_ARTICLE_LIMIT = 3
+FREE_GRAMMAR_LIMIT = 3
+FREE_TRUTH_LIE_LIMIT = 3
 
 def get_user_article_count(user_id):
     with closing(db()) as conn:
@@ -473,6 +475,32 @@ def get_user_article_count(user_id):
         c.execute("SELECT daily_articles, last_article_reset FROM users WHERE id=%s", (user_id,))
         row = c.fetchone()
     return row
+
+
+def get_user_grammar_count_today(user_id):
+    """Get count of grammar sets played by user today."""
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT COUNT(*) FROM user_game_grammar_history 
+            WHERE user_id = %s AND DATE(created_at) = %s
+        """, (user_id, today))
+        row = c.fetchone()
+    return row[0] if row else 0
+
+
+def get_user_truth_lie_count_today(user_id):
+    """Get count of truth/lie games played by user today."""
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT COUNT(*) FROM user_game_truth_lie_history 
+            WHERE user_id = %s AND DATE(created_at) = %s
+        """, (user_id, today))
+        row = c.fetchone()
+    return row[0] if row else 0
 
 def increment_user_counter(user_id, field):
     with closing(db()) as conn:
@@ -2158,6 +2186,22 @@ async def cb_truth_lie_topic(c: types.CallbackQuery):
     user_id = c.from_user.id
     log_event(user_id, "truth_lie_topic_selected", {"topic": topic_key})
     
+    # Check free user limit
+    if not is_paid_user(user_id):
+        truth_lie_count = get_user_truth_lie_count_today(user_id)
+        if truth_lie_count >= FREE_TRUTH_LIE_LIMIT:
+            log_event(user_id, "truth_lie_limit_reached", {"count": truth_lie_count})
+            await c.answer()
+            await c.message.edit_text(
+                "🔒 Ты сыграл 3 раунда «2 правды 1 ложь» сегодня!\n\n"
+                "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                    [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+                ])
+            )
+            return
+    
     await c.answer("Ищу факты... 🕵️")
     
     game_set = get_truth_lie_set(user_id, topic_key)
@@ -2285,6 +2329,22 @@ async def cb_grammar_level(c: types.CallbackQuery):
     level = c.data.split(":")[-1]
     user_id = c.from_user.id
     log_event(user_id, "grammar_level_selected", {"level": level})
+    
+    # Check free user limit
+    if not is_paid_user(user_id):
+        grammar_count = get_user_grammar_count_today(user_id)
+        if grammar_count >= FREE_GRAMMAR_LIMIT:
+            log_event(user_id, "grammar_limit_reached", {"count": grammar_count})
+            await c.answer()
+            await c.message.edit_text(
+                "🔒 Ты прошёл 3 сета грамматики сегодня!\n\n"
+                "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                    [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+                ])
+            )
+            return
     
     await c.answer("Ищу задания... 🕵️")
     
@@ -2514,14 +2574,22 @@ def init_game_tables():
             c.execute("""
                 CREATE TABLE IF NOT EXISTS user_game_grammar_history (
                     id SERIAL PRIMARY KEY,
-                    user_id INTEGER,
-                    set_id INTEGER,
+                    user_id BIGINT,
+                    set_id BIGINT,
                     answer_index INTEGER,
                     is_correct BOOLEAN,
                     created_at TIMESTAMPTZ DEFAULT now()
                 )
             """)
             conn.commit()
+            
+            # Migration: change set_id to BIGINT if needed
+            try:
+                c.execute("ALTER TABLE user_game_grammar_history ALTER COLUMN set_id TYPE BIGINT")
+                c.execute("ALTER TABLE user_game_grammar_history ALTER COLUMN user_id TYPE BIGINT")
+                conn.commit()
+            except Exception:
+                conn.rollback()
     except Exception as e:
         logging.error(f"Failed to init game tables: {e}")
 
