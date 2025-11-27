@@ -245,8 +245,9 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
     """
     try:
         prompt = (
-            "You are an objective evaluator.\n"
-            "Determine whether the user's reply fulfills the short task below.\n\n"
+            "You are a friendly English teacher evaluating task completion.\n"
+            "Determine whether the user made a reasonable attempt to fulfill the task.\n"
+            "Be lenient: if they addressed the topic and made an effort, consider it done.\n\n"
             f"Task: {task_text}\n\n"
             f"User reply: {user_text}\n\n"
             "Answer with strict JSON only, no extra text.\n"
@@ -255,7 +256,7 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
         resp = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": "You return strict JSON only."}, {"role": "user", "content": prompt}],
-            temperature=0.0,
+            temperature=0.3,
         )
         text = resp.choices[0].message["content"]
         logging.debug(f"Task check raw response: {text}")
@@ -280,9 +281,10 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
     # Fallback heuristic: simple substring match of 2-3 important words from task_text
     try:
         lowered = (user_text or "").lower()
-        words = [w.strip('.,?!') for w in task_text.split() if len(w) > 3][:3]
+        words = [w.strip('.,?!') for w in task_text.split() if len(w) > 3][:5]
         hits = sum(1 for w in words if w.lower() in lowered)
-        if hits >= 1:
+        # More lenient: if user wrote something substantial (>10 chars) and has any keyword match
+        if len(user_text) > 10 and hits >= 1:
             return {"done": True, "explanation": "(эвристика) найдено ключевое слово"}
     except Exception:
         pass
@@ -468,6 +470,7 @@ def reset_daily_sent(user_id):
 FREE_ARTICLE_LIMIT = 3
 FREE_GRAMMAR_LIMIT = 3
 FREE_TRUTH_LIE_LIMIT = 3
+FREE_CHAT_MESSAGES_LIMIT = 10
 
 def get_user_article_count(user_id):
     with closing(db()) as conn:
@@ -498,6 +501,23 @@ def get_user_truth_lie_count_today(user_id):
         c.execute("""
             SELECT COUNT(*) FROM user_game_truth_lie_history 
             WHERE user_id = %s AND DATE(created_at) = %s
+        """, (user_id, today))
+        row = c.fetchone()
+    return row[0] if row else 0
+
+
+def get_user_chat_messages_count_today(user_id):
+    """Get count of user messages in chat mode today (for paywall)."""
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        # Count only user messages (role='user') sent today in chat mode
+        # We consider messages as "chat" if they're not commands
+        c.execute("""
+            SELECT COUNT(*) FROM messages 
+            WHERE user_id = %s 
+              AND role = 'user' 
+              AND created_at::date = %s
         """, (user_id, today))
         row = c.fetchone()
     return row[0] if row else 0
@@ -1165,6 +1185,36 @@ async def choose_mode(c: types.CallbackQuery):
         # If topics already chosen before, don't force selection every time;
         # just bring a new article based on saved interests.
         if existing:
+            # Check article limit BEFORE sending news
+            paid = is_paid_user(user_id)
+            
+            if not paid:
+                count_row = get_user_article_count(user_id)
+                today = date.today()
+                daily_articles = count_row[0] if count_row else 0
+                last_reset = count_row[1] if count_row else None
+                
+                logging.info(f"[mode:news] user={user_id} paid={paid} daily_articles={daily_articles} last_reset={last_reset} today={today} limit={FREE_ARTICLE_LIMIT}")
+                
+                if last_reset == today and daily_articles >= FREE_ARTICLE_LIMIT:
+                    increment_user_counter(user_id, "paywall_shown")
+                    log_event(user_id, "paywall_shown", {"reason": "article_limit", "count": daily_articles})
+                    logging.info(f"[mode:news] PAYWALL TRIGGERED for user={user_id}")
+                    kb = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+                    ])
+                    await c.message.edit_text(
+                        "🔒 Ты прочитал 3 статьи сегодня!\n\n"
+                        "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                        reply_markup=kb
+                    )
+                    return
+            
+            # Increment counter and send news
+            increment_user_article_count(user_id)
+            logging.info(f"[mode:news] Article count incremented for user={user_id}")
+            
             await c.message.edit_text(
                 "Отлично! Я подберу статью по твоим темам. Вот новость 📰:",
             )
@@ -1255,6 +1305,38 @@ async def choose_topics(c: types.CallbackQuery):
         if not selected:
             await c.answer("Выбери хотя бы одну тему 🙂", show_alert=True)
             return
+        
+        # Check article limit BEFORE sending news
+        user_id = c.from_user.id
+        paid = is_paid_user(user_id)
+        
+        if not paid:
+            count_row = get_user_article_count(user_id)
+            today = date.today()
+            daily_articles = count_row[0] if count_row else 0
+            last_reset = count_row[1] if count_row else None
+            
+            logging.info(f"[topic:done] user={user_id} paid={paid} daily_articles={daily_articles} last_reset={last_reset} today={today} limit={FREE_ARTICLE_LIMIT}")
+            
+            if last_reset == today and daily_articles >= FREE_ARTICLE_LIMIT:
+                increment_user_counter(user_id, "paywall_shown")
+                log_event(user_id, "paywall_shown", {"reason": "article_limit", "count": daily_articles})
+                logging.info(f"[topic:done] PAYWALL TRIGGERED for user={user_id}")
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                    [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+                ])
+                await c.message.edit_text(
+                    "🔒 Ты прочитал 3 статьи сегодня!\n\n"
+                    "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                    reply_markup=kb
+                )
+                return
+        
+        # Increment counter and send news
+        increment_user_article_count(user_id)
+        logging.info(f"[topic:done] Article count incremented for user={user_id}")
+        
         await c.message.edit_text(
             "Отлично! Я принесу материал для обсуждения. Вот новость 📰:\n\n"
             "Темы новостей всегда можно изменить командой /newstopics."
@@ -1378,33 +1460,49 @@ async def more_news(c: types.CallbackQuery):
     user_id = c.from_user.id
     log_event(user_id, "news_requested", {})
     save_msg(user_id, "user", c.data)
-    increment_user_article_count(user_id)
-    count_row = get_user_article_count(user_id)
-    today = date.today()
-    daily_articles = count_row[0] if count_row else 0
-    last_reset = count_row[1] if count_row else None
-    if last_reset != today:
-        daily_articles = 0
-
+    
+    # Check limit BEFORE incrementing
     paid = is_paid_user(user_id)
-    try:
-        logging.info(f"Paywall check [more]: user={user_id} daily_articles={daily_articles} last_reset={last_reset} paid={paid} limit={FREE_ARTICLE_LIMIT}")
-    except Exception:
-        pass
+    
+    if not paid:
+        count_row = get_user_article_count(user_id)
+        today = date.today()
+        daily_articles = count_row[0] if count_row else 0
+        last_reset = count_row[1] if count_row else None
+        
+        logging.info(f"[more_news] user={user_id} paid={paid} daily_articles={daily_articles} last_reset={last_reset} today={today} limit={FREE_ARTICLE_LIMIT}")
+        
+        # If last reset was today, use current count; otherwise it's a new day (count will reset)
+        if last_reset == today and daily_articles >= FREE_ARTICLE_LIMIT:
+            # Increment paywall_shown counter
+            increment_user_counter(user_id, "paywall_shown")
+            log_event(user_id, "paywall_shown", {"reason": "article_limit", "count": daily_articles})
+            logging.info(f"[more_news] PAYWALL TRIGGERED for user={user_id}")
+            try:
+                await c.answer("Вы достигли лимита бесплатных статей на сегодня.", show_alert=True)
+            except Exception:
+                pass
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+            # Delete the message with the article (might have image) and send new text message
+            try:
+                await c.message.delete()
+            except Exception:
+                pass
+            await bot.send_message(
+                user_id,
+                "🔒 Ты прочитал 3 статьи сегодня!\n\n"
+                "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                reply_markup=kb
+            )
+            return
 
-    if not paid and daily_articles > FREE_ARTICLE_LIMIT:
-        # Increment paywall_shown counter
-        increment_user_counter(user_id, "paywall_shown")
-        try:
-            await c.answer("Вы достигли лимита бесплатных статей на сегодня.", show_alert=True)
-        except Exception:
-            pass
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton("Оформить подписку ⭐️", callback_data="pay:subscribe")]]
-        )
-        await bot.send_message(user_id, "Оформите подписку для неограниченного доступа к статьям.", reply_markup=kb)
-        return
-
+    # Now increment (this will also reset if new day)
+    increment_user_article_count(user_id)
+    logging.info(f"[more_news] Article count incremented for user={user_id}")
+    
     await c.answer("Загружаю другую статью… ⏳")
     await send_news(user_id)
 
@@ -1674,28 +1772,37 @@ async def cmd_news(m: types.Message):
         )
         return
 
-    increment_user_article_count(user_id)
-    count_row = get_user_article_count(user_id)
-    today = date.today()
-    daily_articles = count_row[0] if count_row else 0
-    last_reset = count_row[1] if count_row else None
-    if last_reset != today:
-        daily_articles = 0
-
+    # Check limit BEFORE incrementing
     paid = is_paid_user(user_id)
-    try:
-        logging.info(f"Paywall check [/news]: user={user_id} daily_articles={daily_articles} last_reset={last_reset} paid={paid} limit={FREE_ARTICLE_LIMIT}")
-    except Exception:
-        pass
+    
+    if not paid:
+        count_row = get_user_article_count(user_id)
+        today = date.today()
+        daily_articles = count_row[0] if count_row else 0
+        last_reset = count_row[1] if count_row else None
+        
+        logging.info(f"[/news] user={user_id} paid={paid} daily_articles={daily_articles} last_reset={last_reset} today={today} limit={FREE_ARTICLE_LIMIT}")
+        
+        # If last reset was today, use current count; otherwise it's a new day (count will reset)
+        if last_reset == today and daily_articles >= FREE_ARTICLE_LIMIT:
+            increment_user_counter(user_id, "paywall_shown")
+            log_event(user_id, "paywall_shown", {"reason": "article_limit", "count": daily_articles})
+            logging.info(f"[/news] PAYWALL TRIGGERED for user={user_id}")
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+            await m.answer(
+                "🔒 Ты прочитал 3 статьи сегодня!\n\n"
+                "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                reply_markup=kb
+            )
+            return
 
-    if not paid and daily_articles > FREE_ARTICLE_LIMIT:
-        increment_user_counter(user_id, "paywall_shown")
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton("Оформить подписку ⭐️", callback_data="pay:subscribe")]]
-        )
-        await m.answer("Вы достигли лимита бесплатных статей на сегодня.", reply_markup=kb)
-        return
-
+    # Now increment (this will also reset if new day)
+    increment_user_article_count(user_id)
+    logging.info(f"[/news] Article count incremented for user={user_id}")
+    
     await send_news(user_id)
 
 
@@ -2983,6 +3090,7 @@ async def handle_text_message(m: types.Message):
     
     # Check if user is in a session
     session = USER_CHAT_SESSIONS.get(user_id)
+    logging.info(f"[handle_text_message] user={user_id} text='{text[:50]}' session={session.get('type') if session else None}")
     
     # Handle "bye" command universally for any active session
     if text.lower() in ["bye", "goodbye", "пока", "выход"]:
@@ -3018,6 +3126,32 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     user_id = m.from_user.id
     text = m.text.strip()
     topic_key = session.get("topic", "free")
+    
+    # Check chat message limit BEFORE processing
+    paid = is_paid_user(user_id)
+    
+    if not paid:
+        chat_messages_today = get_user_chat_messages_count_today(user_id)
+        logging.info(f"[handle_roleplay] user={user_id} paid={paid} chat_messages_today={chat_messages_today} limit={FREE_CHAT_MESSAGES_LIMIT}")
+        
+        if chat_messages_today >= FREE_CHAT_MESSAGES_LIMIT:
+            increment_user_counter(user_id, "paywall_shown")
+            log_event(user_id, "paywall_shown", {"reason": "chat_limit", "count": chat_messages_today})
+            logging.info(f"[handle_roleplay] PAYWALL TRIGGERED for user={user_id}")
+            
+            # End the session
+            USER_CHAT_SESSIONS.pop(user_id, None)
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+            await m.answer(
+                "🔒 Ты отправил 10 сообщений в разговорной практике сегодня!\n\n"
+                "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                reply_markup=kb
+            )
+            return
     
     # Check if user wants to end the session
     if text.lower() in ["bye", "goodbye", "пока", "выход"]:
@@ -3193,6 +3327,29 @@ IMPORTANT: Do NOT correct punctuation, capitalization, or contractions. Only cor
 async def handle_general_chat(m: types.Message):
     """Handle general chat (not in roleplay mode)."""
     user_id = m.from_user.id
+    
+    # Check chat message limit BEFORE processing
+    paid = is_paid_user(user_id)
+    
+    if not paid:
+        chat_messages_today = get_user_chat_messages_count_today(user_id)
+        logging.info(f"[handle_general_chat] user={user_id} paid={paid} chat_messages_today={chat_messages_today} limit={FREE_CHAT_MESSAGES_LIMIT}")
+        
+        if chat_messages_today >= FREE_CHAT_MESSAGES_LIMIT:
+            increment_user_counter(user_id, "paywall_shown")
+            log_event(user_id, "paywall_shown", {"reason": "chat_limit", "count": chat_messages_today})
+            logging.info(f"[handle_general_chat] PAYWALL TRIGGERED for user={user_id}")
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+            await m.answer(
+                "🔒 Ты отправил 10 сообщений в разговорной практике сегодня!\n\n"
+                "Чтобы продолжить без ограничений, приобрети безлимитный доступ 💎",
+                reply_markup=kb
+            )
+            return
     
     # Get user info for context
     user = get_user(user_id)
