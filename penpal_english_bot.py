@@ -3715,28 +3715,44 @@ if __name__ == '__main__':
     init_game_tables()
     
     # Check if we should run with webhook
-    webhook_url = os.getenv("WEBHOOK_URL")
     use_webhook = os.getenv("USE_WEBHOOK", "false").lower() == "true"
     
-    if use_webhook and webhook_url:
-        # Run with webhook (for production on Heroku)
+    if use_webhook:
+        # Production mode: run polling for Telegram + webhook server for YooKassa
         from aiohttp import web
+        import asyncio
         
+        logging.info("Starting bot in HYBRID mode (polling for Telegram + webhook for YooKassa)")
+        
+        # Create aiohttp app for YooKassa webhook
         app = web.Application()
         app.router.add_post('/yookassa/webhook', yookassa_webhook)
         
-        # Set up aiogram webhook
-        executor.start_webhook(
-            dispatcher=dp,
-            webhook_path='/',
-            skip_updates=True,
-            on_startup=on_startup,
-            on_shutdown=on_shutdown,
-            host='0.0.0.0',
-            port=int(os.getenv('PORT', 8443))
-        )
+        # Start Telegram polling in background
+        async def start_bot_polling():
+            await dp.skip_updates()
+            await dp.start_polling()
+        
+        async def start_all():
+            # Start polling in background task
+            asyncio.create_task(start_bot_polling())
+            
+            # Start webhook server
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '0.0.0.0', int(os.getenv('PORT', 8443)))
+            await site.start()
+            
+            logging.info(f"Webhook server started on port {os.getenv('PORT', 8443)}")
+            
+            # Keep running
+            while True:
+                await asyncio.sleep(3600)
+        
+        # Run everything
+        asyncio.run(start_all())
     else:
-        # Run with polling (for local development)
-        logging.info("Running in polling mode (local development)")
+        # Local development: polling only
+        logging.info("Starting bot in POLLING mode (local development)")
         executor.start_polling(dp, skip_updates=True)
 
