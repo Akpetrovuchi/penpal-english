@@ -58,6 +58,8 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPri
 from aiogram.utils import executor
 from dotenv import load_dotenv
 import openai
+import hashlib
+from yookassa import Configuration, Payment as YooPayment
 try:
     from zoneinfo import ZoneInfo
 except Exception:
@@ -70,6 +72,18 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai.api_key = OPENAI_API_KEY
+
+# YooKassa Configuration
+YOOKASSA_SHOP_ID = os.getenv("YOOKASSA_SHOP_ID")
+YOOKASSA_SECRET_KEY = os.getenv("YOOKASSA_SECRET_KEY")
+
+if YOOKASSA_SHOP_ID and YOOKASSA_SECRET_KEY:
+    Configuration.account_id = YOOKASSA_SHOP_ID
+    Configuration.secret_key = YOOKASSA_SECRET_KEY
+    logging.info("YooKassa configured successfully")
+else:
+    logging.warning("YooKassa credentials not set")
+
 # Telegram Payments provider token (from @BotFather > Payments)
 PAYMENTS_PROVIDER_TOKEN = os.getenv("PAYMENTS_PROVIDER_TOKEN")
 # Subscription price configuration
@@ -435,6 +449,22 @@ def init_db():
             created_at TIMESTAMPTZ DEFAULT now()
         )
         """)
+        # Payments table for YooKassa
+        c.execute("""
+        CREATE TABLE IF NOT EXISTS payments(
+            id SERIAL PRIMARY KEY,
+            user_id BIGINT NOT NULL,
+            payment_id TEXT UNIQUE NOT NULL,
+            amount DECIMAL(10,2) NOT NULL,
+            currency TEXT DEFAULT 'RUB',
+            status TEXT DEFAULT 'pending',
+            plan TEXT,
+            created_at TIMESTAMPTZ DEFAULT now(),
+            paid_at TIMESTAMPTZ,
+            metadata JSONB
+        )
+        """)
+        conn.commit()
 import uuid
 import threading
 from collections import defaultdict
@@ -553,6 +583,114 @@ def set_user_subscription(user_id, status: str = "paid"):
         c = conn.cursor()
         c.execute("UPDATE users SET subscription=%s WHERE id=%s", (status, user_id))
         conn.commit()
+
+
+# --- YooKassa Payment Functions ---
+
+def create_payment(user_id: int, amount: float, plan: str, description: str):
+    """Create YooKassa payment and save to DB."""
+    try:
+        # Generate unique idempotence key
+        timestamp = datetime.utcnow().isoformat()
+        idempotence_key = hashlib.md5(f"{user_id}{amount}{plan}{timestamp}".encode()).hexdigest()
+        
+        # Get user email if available (for receipt)
+        user = get_user(user_id)
+        user_email = user.get("email") if user and user.get("email") else None
+        
+        logging.info(f"Creating payment for user {user_id}, amount {amount}, plan {plan}")
+        
+        payment_data = {
+            "amount": {
+                "value": f"{amount:.2f}",
+                "currency": "RUB"
+            },
+            "confirmation": {
+                "type": "redirect",
+                "return_url": "https://t.me/MaxEnglishPracticeBot"
+            },
+            "capture": True,
+            "description": description,
+            "metadata": {
+                "user_id": str(user_id),
+                "plan": plan
+            },
+            "receipt": {
+                "customer": {
+                    "email": user_email if user_email else "customer@example.com"
+                },
+                "items": [
+                    {
+                        "description": description,
+                        "quantity": "1.00",
+                        "amount": {
+                            "value": f"{amount:.2f}",
+                            "currency": "RUB"
+                        },
+                        "vat_code": 1,
+                        "payment_mode": "full_payment",
+                        "payment_subject": "service"
+                    }
+                ]
+            }
+        }
+        
+        logging.info(f"Payment data prepared: {json.dumps(payment_data, indent=2)}")
+        
+        payment = YooPayment.create(payment_data, idempotence_key)
+        
+        logging.info(f"YooKassa payment created: {payment.id}, status: {payment.status}")
+        
+        # Save to DB
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO payments (user_id, payment_id, amount, currency, status, plan, metadata)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """, (user_id, payment.id, amount, "RUB", payment.status, plan, json.dumps(dict(payment.metadata))))
+            conn.commit()
+            
+        logging.info(f"Payment saved to DB: {payment.id} for user {user_id}, amount {amount}")
+        return payment
+        
+    except Exception as e:
+        logging.exception(f"Failed to create payment: {e}")
+        return None
+
+def check_payment_status(payment_id: str):
+    """Check payment status from YooKassa."""
+    try:
+        payment = YooPayment.find_one(payment_id)
+        
+        # Update DB
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                UPDATE payments 
+                SET status = %s, 
+                    paid_at = CASE WHEN %s = 'succeeded' THEN now() ELSE paid_at END
+                WHERE payment_id = %s
+            """, (payment.status, payment.status, payment_id))
+            conn.commit()
+            
+        logging.info(f"Payment {payment_id} status: {payment.status}")
+        return payment
+        
+    except Exception as e:
+        logging.exception(f"Failed to check payment: {e}")
+        return None
+
+
+def activate_subscription(user_id: int, plan: str):
+    """Activate subscription for user after successful payment."""
+    try:
+        set_user_subscription(user_id, "paid")
+        log_event(user_id, "subscription_activated", {"plan": plan})
+        logging.info(f"Subscription activated for user {user_id}, plan: {plan}")
+        return True
+    except Exception as e:
+        logging.exception(f"Failed to activate subscription: {e}")
+        return False
     c.execute("""
     CREATE TABLE IF NOT EXISTS messages(
         id SERIAL PRIMARY KEY,
@@ -2614,8 +2752,113 @@ async def cb_profile_buy(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data in ["pay:monthly", "pay:yearly"])
 async def cb_pay_plan(c: types.CallbackQuery):
     plan = c.data.split(":")[1]
-    log_event(c.from_user.id, "subscription_plan_selected", {"plan": plan})
-    await c.answer("Оплата скоро будет доступна 🙂", show_alert=True)
+    user_id = c.from_user.id
+    
+    log_event(user_id, "subscription_plan_selected", {"plan": plan})
+    
+    # Define amounts and descriptions
+    amounts = {
+        "monthly": 500.00,
+        "yearly": 1499.00
+    }
+    
+    descriptions = {
+        "monthly": "Подписка PenPal English — 1 месяц",
+        "yearly": "Подписка PenPal English — 1 год (экономия 4501₽)"
+    }
+    
+    amount = amounts.get(plan, 500.00)
+    description = descriptions.get(plan, "Подписка PenPal English")
+    
+    await c.answer("Создаю счёт... ⏳")
+    
+    # Create payment
+    payment = create_payment(user_id, amount, plan, description)
+    
+    if not payment:
+        await c.message.edit_text(
+            "❌ Не удалось создать счёт. Попробуй позже или свяжись с поддержкой.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Назад ↩️", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+        )
+        return
+        
+    # Get payment URL
+    payment_url = payment.confirmation.confirmation_url
+    
+    # Create keyboard with payment button
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Оплатить 💳", url=payment_url)],
+        [InlineKeyboardButton("Проверить оплату ✅", callback_data=f"check_payment:{payment.id}")],
+        [InlineKeyboardButton("Назад ↩️", callback_data="profile_buy_unlimited")]
+    ])
+    
+    await c.message.edit_text(
+        f"💳 <b>Счёт создан!</b>\n\n"
+        f"💰 Сумма: <b>{amount:.0f} ₽</b>\n"
+        f"📦 Тариф: <b>{description}</b>\n\n"
+        f"1️⃣ Нажми «Оплатить», чтобы перейти к оплате\n"
+        f"2️⃣ После оплаты нажми «Проверить оплату»\n\n"
+        f"Оплата защищена ЮKassa 🔒",
+        reply_markup=kb
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("check_payment:"))
+async def cb_check_payment(c: types.CallbackQuery):
+    """Check payment status manually."""
+    payment_id = c.data.split(":", 1)[1]
+    user_id = c.from_user.id
+    
+    await c.answer("Проверяю оплату... ⏳")
+    
+    payment = check_payment_status(payment_id)
+    
+    if not payment:
+        await c.answer("❌ Не удалось проверить статус платежа. Попробуй позже.", show_alert=True)
+        return
+        
+    if payment.status == "succeeded":
+        # Get plan from DB
+        with closing(db()) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT plan FROM payments WHERE payment_id = %s", (payment_id,))
+            row = cur.fetchone()
+            plan = row[0] if row else "unknown"
+            
+        # Activate subscription
+        activate_subscription(user_id, plan)
+        
+        await c.message.edit_text(
+            "✅ <b>Оплата прошла успешно!</b>\n\n"
+            "🎉 Подписка активирована!\n\n"
+            "Теперь у тебя безлимитный доступ:\n"
+            "✅ Неограниченные статьи\n"
+            "✅ Неограниченные игры\n"
+            "✅ Неограниченная разговорная практика\n\n"
+            "Спасибо за поддержку проекта! 💙",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+        )
+        
+    elif payment.status == "pending":
+        await c.answer("⏳ Платёж ещё обрабатывается. Попробуй через минуту.", show_alert=True)
+        
+    elif payment.status == "canceled":
+        await c.message.edit_text(
+            "❌ <b>Платёж отменён</b>\n\n"
+            "Попробуй ещё раз или свяжись с поддержкой, если возникли проблемы.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Попробовать снова 🔄", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+        )
+    else:
+        await c.answer(f"Статус платежа: {payment.status}", show_alert=True)
+
 
 @dp.callback_query_handler(lambda c: c.data == "profile_news_settings")
 async def cb_profile_news(c: types.CallbackQuery):
@@ -3385,7 +3628,115 @@ async def handle_general_chat(m: types.Message):
     await m.answer(response, reply_markup=kb)
 
 
+# --- YooKassa Webhook Handler ---
+
+from aiohttp import web
+
+async def yookassa_webhook(request):
+    """Handle YooKassa webhook notifications for automatic payment confirmation."""
+    try:
+        # Get JSON data from request
+        data = await request.json()
+        
+        event_type = data.get("event")
+        payment_data = data.get("object")
+        
+        logging.info(f"Webhook received: event={event_type}, payment_id={payment_data.get('id') if payment_data else 'unknown'}")
+        
+        if event_type == "payment.succeeded" and payment_data:
+            payment_id = payment_data.get("id")
+            metadata = payment_data.get("metadata", {})
+            user_id = metadata.get("user_id")
+            plan = metadata.get("plan")
+            
+            if user_id and plan:
+                user_id = int(user_id)
+                
+                # Update payment status in DB
+                with closing(db()) as conn:
+                    c = conn.cursor()
+                    c.execute("""
+                        UPDATE payments 
+                        SET status = 'succeeded', paid_at = now()
+                        WHERE payment_id = %s
+                    """, (payment_id,))
+                    conn.commit()
+                
+                # Activate subscription
+                activate_subscription(user_id, plan)
+                
+                # Notify user via bot
+                try:
+                    await bot.send_message(
+                        user_id,
+                        "✅ <b>Оплата прошла успешно!</b>\n\n"
+                        "🎉 Подписка активирована!\n\n"
+                        "Теперь у тебя безлимитный доступ:\n"
+                        "✅ Неограниченные статьи\n"
+                        "✅ Неограниченные игры\n"
+                        "✅ Неограниченная разговорная практика\n\n"
+                        "Спасибо за поддержку проекта! 💙"
+                    )
+                except Exception as e:
+                    logging.exception(f"Failed to send notification to user {user_id}: {e}")
+                    
+                logging.info(f"Subscription activated via webhook for user {user_id}, plan: {plan}")
+            else:
+                logging.warning(f"Missing user_id or plan in payment metadata: {metadata}")
+                    
+        return web.Response(status=200, text="OK")
+        
+    except Exception as e:
+        logging.exception(f"Webhook error: {e}")
+        return web.Response(status=400, text="Bad Request")
+
+
+async def on_startup(dp):
+    """Initialize webhook on startup."""
+    webhook_path = "/yookassa/webhook"
+    webhook_url = os.getenv("WEBHOOK_URL")  # e.g., https://yourdomain.com/yookassa/webhook
+    
+    if webhook_url:
+        logging.info(f"Setting up webhook at {webhook_url}")
+        # Note: You'll need to configure webhook URL in YooKassa dashboard
+    else:
+        logging.warning("WEBHOOK_URL not set, webhook will not be configured")
+
+
+async def on_shutdown(dp):
+    """Cleanup on shutdown."""
+    logging.info("Shutting down...")
+
+
 if __name__ == '__main__':
+    # Initialize database tables
+    init_db()
     # Ensure game tables exist
     init_game_tables()
-    executor.start_polling(dp, skip_updates=True)
+    
+    # Check if we should run with webhook
+    webhook_url = os.getenv("WEBHOOK_URL")
+    use_webhook = os.getenv("USE_WEBHOOK", "false").lower() == "true"
+    
+    if use_webhook and webhook_url:
+        # Run with webhook (for production on Heroku)
+        from aiohttp import web
+        
+        app = web.Application()
+        app.router.add_post('/yookassa/webhook', yookassa_webhook)
+        
+        # Set up aiogram webhook
+        executor.start_webhook(
+            dispatcher=dp,
+            webhook_path='/',
+            skip_updates=True,
+            on_startup=on_startup,
+            on_shutdown=on_shutdown,
+            host='0.0.0.0',
+            port=int(os.getenv('PORT', 8443))
+        )
+    else:
+        # Run with polling (for local development)
+        logging.info("Running in polling mode (local development)")
+        executor.start_polling(dp, skip_updates=True)
+
