@@ -511,16 +511,21 @@ def get_session_id(user_id):
 def update_streak(user_id):
     """Update user's streak based on today's activity. Returns (current_streak, is_new_day)."""
     today = date.today()
+    logging.info(f"[update_streak] user={user_id}, today={today}")
+    
     with closing(db()) as conn:
         c = conn.cursor()
         c.execute("SELECT current_streak, last_activity_date, streak_notified_today FROM users WHERE id=%s", (user_id,))
         row = c.fetchone()
         
         if not row:
+            logging.warning(f"[update_streak] No user found with id={user_id}")
             return 0, False
             
         current_streak, last_activity_date, streak_notified_today = row
         current_streak = current_streak or 0
+        
+        logging.info(f"[update_streak] user={user_id}, current_streak={current_streak}, last_activity_date={last_activity_date}, notified={streak_notified_today}")
         
         # First activity ever
         if not last_activity_date:
@@ -530,10 +535,12 @@ def update_streak(user_id):
                 WHERE id=%s
             """, (today, user_id))
             conn.commit()
+            logging.info(f"[update_streak] First activity: user={user_id}, streak=1")
             return 1, True
         
         # Same day - no change to streak
         if last_activity_date == today:
+            logging.info(f"[update_streak] Same day: user={user_id}, streak={current_streak}")
             return current_streak, False
         
         # Next day - increment streak
@@ -545,6 +552,7 @@ def update_streak(user_id):
                 WHERE id=%s
             """, (new_streak, today, user_id))
             conn.commit()
+            logging.info(f"[update_streak] Next day: user={user_id}, new_streak={new_streak}")
             return new_streak, True
         
         # Gap in activity - reset streak to 1
@@ -554,6 +562,7 @@ def update_streak(user_id):
             WHERE id=%s
         """, (today, user_id))
         conn.commit()
+        logging.info(f"[update_streak] Gap detected: user={user_id}, reset to streak=1")
         return 1, True
 
 
@@ -1884,15 +1893,19 @@ async def menu_main_callback(c: types.CallbackQuery):
     # Update streak and check if we should show notification
     try:
         streak, is_new_day = update_streak(user_id)
-    except (TypeError, ValueError):
+        logging.info(f"[menu_main_callback] user={user_id}, streak={streak}, is_new_day={is_new_day}")
+    except (TypeError, ValueError) as e:
         # Fallback if update_streak returns None or invalid data
+        logging.error(f"[menu_main_callback] Error in update_streak for user={user_id}: {e}")
         streak, is_new_day = 0, False
     
     show_notification = is_new_day and should_show_streak_notification(user_id)
+    logging.info(f"[menu_main_callback] user={user_id}, show_notification={show_notification}")
     
     if show_notification:
         # Show streak notification
         mark_streak_notified(user_id)
+        logging.info(f"[menu_main_callback] Showing streak notification: user={user_id}, streak={streak}")
         
         streak_emoji = "🔥" * min(streak, 5)  # Show up to 5 fire emojis
         await c.message.answer(
