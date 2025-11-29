@@ -1221,6 +1221,15 @@ async def start(m: types.Message):
     save_user(m.from_user.id, m.from_user.username or "")
     save_msg(m.from_user.id, "user", "/start")
     log_event(m.from_user.id, "onboarding_started", {})
+    
+    # Send welcome sticker
+    try:
+        # Replace with your actual sticker file_id
+        sticker_file_id = "CAACAgIAAxkBAAEDMBZnSvK8AAFmU3h_YOUR_STICKER_FILE_ID_HERE"
+        await m.answer_sticker(sticker_file_id)
+    except Exception:
+        logging.exception("Failed to send welcome sticker")
+    
     # Reset topics and onboarding fields for this user
     try:
         set_user_topics(m.from_user.id, [])
@@ -3315,6 +3324,14 @@ async def handle_training_answer(c: types.CallbackQuery):
 
 
 # --- Text message handler (must be last!) ---
+@dp.message_handler(content_types=types.ContentTypes.STICKER)
+async def handle_sticker(m: types.Message):
+    """Temporary handler to get sticker file_id for /start command."""
+    sticker_id = m.sticker.file_id
+    print(f"[STICKER] User {m.from_user.id} sent sticker with file_id: {sticker_id}", flush=True)
+    await m.answer(f"Стикер получен!\n\nfile_id:\n<code>{sticker_id}</code>\n\nСкопируй этот ID и вставь в код.")
+
+
 @dp.message_handler(content_types=types.ContentTypes.TEXT)
 async def handle_text_message(m: types.Message):
     """
