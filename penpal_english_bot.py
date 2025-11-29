@@ -260,8 +260,11 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
     try:
         prompt = (
             "You are a friendly English teacher evaluating task completion.\n"
-            "Determine whether the user made a reasonable attempt to fulfill the task.\n"
-            "Be lenient: if they addressed the topic and made an effort, consider it done.\n\n"
+            "The user should write at least 2-3 complete sentences that directly address the task.\n"
+            "Mark done=true only if:\n"
+            "- The answer is relevant to the task\n"
+            "- It contains at least 2 meaningful sentences (not just 1-2 words)\n"
+            "- Shows genuine effort (not joke/nonsense answers)\n\n"
             f"Task: {task_text}\n\n"
             f"User reply: {user_text}\n\n"
             "Answer with strict JSON only, no extra text.\n"
