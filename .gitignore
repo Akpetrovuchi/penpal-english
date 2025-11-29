@@ -14,7 +14,7 @@ dist/
 .python-version
 
 # dotenv
-.env
+.env*
 
 # logs
 bot.log

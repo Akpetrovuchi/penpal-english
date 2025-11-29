@@ -3893,5 +3893,6 @@ if __name__ == '__main__':
     else:
         # Local development: polling only
         logging.info("Starting bot in POLLING mode (local development)")
+
         executor.start_polling(dp, skip_updates=True)
 
