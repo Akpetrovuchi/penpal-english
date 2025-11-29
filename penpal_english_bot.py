@@ -477,6 +477,15 @@ def init_db():
             metadata JSONB
         )
         """)
+        
+        # Add streak fields if they don't exist
+        c.execute("""
+        ALTER TABLE users 
+        ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0,
+        ADD COLUMN IF NOT EXISTS last_activity_date DATE,
+        ADD COLUMN IF NOT EXISTS streak_notified_today BOOLEAN DEFAULT FALSE
+        """)
+        
         conn.commit()
 import uuid
 import threading
@@ -496,6 +505,83 @@ def get_session_id(user_id):
             sess['session_id'] = uuid.uuid4()
         sess['last_event_time'] = now
         return sess['session_id']
+
+
+# Streak helpers
+def update_streak(user_id):
+    """Update user's streak based on today's activity. Returns (current_streak, is_new_day)."""
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT current_streak, last_activity_date, streak_notified_today FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        
+        if not row:
+            return 0, False
+            
+        current_streak, last_activity_date, streak_notified_today = row
+        current_streak = current_streak or 0
+        
+        # First activity ever
+        if not last_activity_date:
+            c.execute("""
+                UPDATE users 
+                SET current_streak = 1, last_activity_date = %s, streak_notified_today = FALSE 
+                WHERE id=%s
+            """, (today, user_id))
+            conn.commit()
+            return 1, True
+        
+        # Same day - no change to streak
+        if last_activity_date == today:
+            return current_streak, False
+        
+        # Next day - increment streak
+        if last_activity_date == today - timedelta(days=1):
+            new_streak = current_streak + 1
+            c.execute("""
+                UPDATE users 
+                SET current_streak = %s, last_activity_date = %s, streak_notified_today = FALSE 
+                WHERE id=%s
+            """, (new_streak, today, user_id))
+            conn.commit()
+            return new_streak, True
+        
+        # Gap in activity - reset streak to 1
+        c.execute("""
+            UPDATE users 
+            SET current_streak = 1, last_activity_date = %s, streak_notified_today = FALSE 
+            WHERE id=%s
+        """, (today, user_id))
+        conn.commit()
+        return 1, True
+
+
+def should_show_streak_notification(user_id):
+    """Check if we should show streak notification today."""
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT streak_notified_today FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        return row and not row[0]
+
+
+def mark_streak_notified(user_id):
+    """Mark that we've shown streak notification today."""
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE users SET streak_notified_today = TRUE WHERE id=%s", (user_id,))
+        conn.commit()
+
+
+def get_day_word(n):
+    """Return correct Russian word form for 'day' based on number."""
+    if n % 10 == 1 and n % 100 != 11:
+        return "день"
+    elif 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
+        return "дня"
+    else:
+        return "дней"
 
 
 # Daily sent helpers
@@ -1793,6 +1879,26 @@ async def news_next(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "menu:main")
 async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
+    user_id = c.from_user.id
+    
+    # Update streak and check if we should show notification
+    streak, is_new_day = update_streak(user_id)
+    show_notification = is_new_day and should_show_streak_notification(user_id)
+    
+    if show_notification:
+        # Show streak notification
+        mark_streak_notified(user_id)
+        
+        streak_emoji = "🔥" * min(streak, 5)  # Show up to 5 fire emojis
+        await c.message.answer(
+            f"🎉 <b>Отличная работа!</b>\n\n"
+            f"{streak_emoji} Победная серия: <b>{streak} {get_day_word(streak)}</b>\n\n"
+            f"Тренируйся ежедневно и общайся как носитель! 💪",
+        )
+        
+        # Wait before showing menu
+        await asyncio.sleep(2)
+    
     try:
         await c.message.edit_text(
             "Меню активности — выбери, что хочешь сделать:",
@@ -1805,7 +1911,7 @@ async def menu_main_callback(c: types.CallbackQuery):
             reply_markup=mode_keyboard()
         )
     # Also clear active chat topic session when user returns to menu from callbacks
-    USER_CHAT_SESSIONS.pop(c.from_user.id, None)
+    USER_CHAT_SESSIONS.pop(user_id, None)
 
 
 @dp.message_handler(commands=["topics"])
@@ -3370,6 +3476,25 @@ async def handle_text_message(m: types.Message):
             elif session_type == "roleplay":
                 log_event(user_id, "chat_closed", {"topic": session.get("topic")})
             USER_CHAT_SESSIONS.pop(user_id, None)
+            
+            # Update streak and check if we should show notification
+            streak, is_new_day = update_streak(user_id)
+            show_notification = is_new_day and should_show_streak_notification(user_id)
+            
+            if show_notification:
+                # Show streak notification
+                mark_streak_notified(user_id)
+                
+                streak_emoji = "🔥" * min(streak, 5)  # Show up to 5 fire emojis
+                await m.answer(
+                    f"🎉 <b>Отличная работа!</b>\n\n"
+                    f"{streak_emoji} Победная серия: <b>{streak} {get_day_word(streak)}</b>\n\n"
+                    f"Тренируйся ежедневно и общайся как носитель! 💪"
+                )
+                
+                # Wait before showing menu
+                await asyncio.sleep(2)
+            
             await m.answer(
                 "Хорошая работа! Возвращаю тебя в меню 🏠",
                 reply_markup=mode_keyboard()
@@ -3426,6 +3551,25 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     if text.lower() in ["bye", "goodbye", "пока", "выход"]:
         completed = session.get("completed_count", 0)
         USER_CHAT_SESSIONS.pop(user_id, None)
+        
+        # Update streak and check if we should show notification
+        streak, is_new_day = update_streak(user_id)
+        show_notification = is_new_day and should_show_streak_notification(user_id)
+        
+        if show_notification:
+            # Show streak notification
+            mark_streak_notified(user_id)
+            
+            streak_emoji = "🔥" * min(streak, 5)  # Show up to 5 fire emojis
+            await m.answer(
+                f"🎉 <b>Отличная работа!</b>\n\n"
+                f"{streak_emoji} Победная серия: <b>{streak} {get_day_word(streak)}</b>\n\n"
+                f"Тренируйся ежедневно и общайся как носитель! 💪"
+            )
+            
+            # Wait before showing menu
+            await asyncio.sleep(2)
+        
         await m.answer(
             f"Диалог завершён! 👋\n\nВыполнено заданий: {completed}\n\nВозвращайся, когда захочешь попрактиковаться ещё!",
             reply_markup=mode_keyboard()
