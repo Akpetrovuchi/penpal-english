@@ -508,7 +508,7 @@ def get_session_id(user_id):
 
 # Streak helpers
 def update_streak(user_id):
-    """Update user's streak based on today's activity. Returns (current_streak, is_new_day)."""
+    """Update user's streak based on today's activity. Returns (streak_count, is_new_day)."""
     logging.error(f"[update_streak] ENTRY: user_id={user_id}")
     try:
         today = date.today()
@@ -517,7 +517,7 @@ def update_streak(user_id):
         with closing(db()) as conn:
             c = conn.cursor()
             c.execute("""
-                SELECT current_streak, last_activity_date, streak_notified_today 
+                SELECT streak_count, last_active_date, max_streak, streak_notified_today 
                 FROM users WHERE id=%s
             """, (user_id,))
             row = c.fetchone()
@@ -526,48 +526,54 @@ def update_streak(user_id):
                 logging.error(f"[update_streak] No user found with id={user_id}")
                 return (0, False)
                 
-            current_streak, last_activity_date, streak_notified_today = row
+            streak_count, last_active_date, max_streak, streak_notified_today = row
             
             # Default values
-            if current_streak is None:
-                current_streak = 0
+            if streak_count is None:
+                streak_count = 0
+            if max_streak is None:
+                max_streak = 0
             
             # Calculate new streak
-            if last_activity_date is None:
+            if last_active_date is None:
                 # First time user
                 new_streak = 1
                 is_new_day = True
-            elif last_activity_date == today:
+            elif last_active_date == today:
                 # Same day - no change
-                new_streak = current_streak
+                new_streak = streak_count
                 is_new_day = False
-            elif last_activity_date == today - timedelta(days=1):
+            elif last_active_date == today - timedelta(days=1):
                 # Consecutive day - increment
-                new_streak = current_streak + 1
+                new_streak = streak_count + 1
                 is_new_day = True
             else:
                 # Gap - reset to 1
                 new_streak = 1
                 is_new_day = True
             
+            # Update max_streak if needed
+            new_max_streak = max(max_streak, new_streak)
+            
             # Update database
             c.execute("""
                 UPDATE users 
-                SET current_streak = %s, 
-                    last_activity_date = %s, 
+                SET streak_count = %s, 
+                    last_active_date = %s,
+                    max_streak = %s,
                     streak_notified_today = CASE WHEN %s THEN FALSE ELSE streak_notified_today END
                 WHERE id=%s
-            """, (new_streak, today, is_new_day, user_id))
+            """, (new_streak, today, new_max_streak, is_new_day, user_id))
             conn.commit()
             
-            logging.error(f"[update_streak] user={user_id}, streak={new_streak}, is_new_day={is_new_day}")
+            logging.error(f"[update_streak] user={user_id}, streak={new_streak}, max={new_max_streak}, is_new_day={is_new_day}")
             return (new_streak, is_new_day)
             
     except Exception as e:
         logging.error(f"[update_streak] ERROR for user={user_id}: {e}")
-        return (0, False)
         import traceback
         logging.error(traceback.format_exc())
+        return (0, False)
         return (0, False)
 
 
@@ -1895,7 +1901,7 @@ async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
     user_id = c.from_user.id
     
-    # Update streak and check if we should show notification
+    # Обновляем стрик и решаем, показывать ли уведомление
     streak, is_new_day = update_streak(user_id)
     show_notification = is_new_day and should_show_streak_notification(user_id)
     
@@ -3110,49 +3116,6 @@ def init_game_tables():
         logging.error(f"Failed to init game tables: {e}")
 
 # Helper functions for Profile, Streak, and Dictionary features
-
-def update_streak(user_id):
-    """
-    Updates user streak based on last_active_date.
-    Called from callback handlers that don't use save_msg.
-    Skips DB write if already updated today.
-    """
-    today = date.today()
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("SELECT streak_count, last_active_date, max_streak FROM users WHERE id=%s", (user_id,))
-        row = c.fetchone()
-        
-        if not row:
-            return # User not found or not initialized
-
-        streak_count = row[0] or 0
-        last_active = row[1] # date object or None
-        max_streak = row[2] or 0
-        
-        # Skip if already updated today
-        if last_active == today:
-            return
-        
-        new_streak = streak_count
-        new_max = max_streak
-        
-        if last_active is None:
-            new_streak = 1
-            new_max = max(new_max, 1)
-        elif last_active == today - timedelta(days=1):
-            new_streak += 1
-            new_max = max(new_max, new_streak)
-        else:
-            new_streak = 1 # Streak broken
-            
-        # Update DB
-        c.execute("""
-            UPDATE users 
-            SET streak_count=%s, last_active_date=%s, max_streak=%s 
-            WHERE id=%s
-        """, (new_streak, today, new_max, user_id))
-        conn.commit()
 
 async def maybe_add_to_dictionary(m: types.Message):
     """
