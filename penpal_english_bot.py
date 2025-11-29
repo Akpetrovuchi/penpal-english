@@ -2107,10 +2107,30 @@ async def cmd_help(m: types.Message):
 @dp.message_handler(commands=["menu"])
 async def cmd_menu(m: types.Message):
     save_msg(m.from_user.id, "user", "/menu")
-    session_id = get_session_id(m.from_user.id)
-    log_event(m.from_user.id, "command_used", {"command": "/menu"})
+    user_id = m.from_user.id
+    session_id = get_session_id(user_id)
+    log_event(user_id, "command_used", {"command": "/menu"})
     # From the main menu there should be no active chat topic session
-    USER_CHAT_SESSIONS.pop(m.from_user.id, None)
+    USER_CHAT_SESSIONS.pop(user_id, None)
+    
+    # Update streak and check if we should show notification
+    streak, is_new_day = update_streak(user_id)
+    show_notification = is_new_day and should_show_streak_notification(user_id)
+    
+    if show_notification:
+        # Show streak notification
+        mark_streak_notified(user_id)
+        
+        streak_emoji = "🔥" * min(streak, 5)  # Show up to 5 fire emojis
+        await m.answer(
+            f"🎉 <b>Отличная работа!</b>\n\n"
+            f"{streak_emoji} Победная серия: <b>{streak} {get_day_word(streak)}</b>\n\n"
+            f"Тренируйся ежедневно и общайся как носитель! 💪"
+        )
+        
+        # Wait before showing menu
+        await asyncio.sleep(2)
+    
     await m.answer(
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
