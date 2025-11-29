@@ -1397,9 +1397,11 @@ async def choose_chat_topic(c: types.CallbackQuery):
         "free": "Свободное общение 🗣️",
     }
     topic_name = names.get(topic_key, topic_key)
-    # start a session with 2 required tasks to complete
+    # start a session with 3 required tasks to complete
     tasks = make_tasks_for_topic(topic_key)
-    # we will require 2 tasks to be completed (or all if fewer)
+    # Take only first 3 tasks
+    tasks = tasks[:3]
+    # we will require 3 tasks to be completed
     USER_CHAT_SESSIONS[user_id] = {
         "type": "roleplay",
         "topic": topic_key,
@@ -1409,8 +1411,8 @@ async def choose_chat_topic(c: types.CallbackQuery):
     }
     # show rules and first tasks
     await c.answer()
-    intro = f"Тема: {topic_name}\n\nПравила: Выполни 2 задания или скажи bye 👋, чтобы завершить диалог."
-    tasks_list = "\n".join([f"{t['id']}) {t['text']}" for t in tasks[:3]])
+    intro = f"Тема: {topic_name}\n\nПравила: Выполни 3 задания или скажи bye 👋, чтобы завершить диалог."
+    tasks_list = "\n".join([f"{t['id']}) {t['text']}" for t in tasks])
     # Ask the language model to play the persona and produce a short intro (in English)
     persona = PERSONA_PROMPTS.get(topic_key, PERSONA_PROMPTS.get("free"))
     try:
@@ -3430,6 +3432,12 @@ async def handle_roleplay_message(m: types.Message, session: dict):
                 task["done"] = True
                 session["completed_count"] = session.get("completed_count", 0) + 1
                 print(f"[roleplay] Task completed! user={user_id}, completed_count={session['completed_count']}, task='{task['text']}'", flush=True)
+                # Log task completion event
+                log_event(user_id, "task_completed", {
+                    "topic": topic_key,
+                    "task": task["text"],
+                    "completed_count": session["completed_count"]
+                })
                 break
     
     # Increment turn counter
