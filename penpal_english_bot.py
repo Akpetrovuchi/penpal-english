@@ -594,6 +594,30 @@ def mark_streak_notified(user_id):
         conn.commit()
 
 
+async def check_and_show_streak_notification(user_id, message_or_callback):
+    """Update streak and show notification if needed. Call this at the start of any user interaction."""
+    streak, is_new_day = update_streak(user_id)
+    
+    if is_new_day and should_show_streak_notification(user_id):
+        mark_streak_notified(user_id)
+        logging.info(f"[streak_notification] Showing for user={user_id}, streak={streak}")
+        
+        streak_emoji = "🔥" * min(streak, 5)
+        notification_text = (
+            f"🎉 <b>Отличная работа!</b>\n\n"
+            f"{streak_emoji} Победная серия продлена: <b>{streak} {get_day_word(streak)}</b>\n\n"
+            f"Продолжай тренироваться каждый день! 💪"
+        )
+        
+        # Determine whether to use message or callback
+        if isinstance(message_or_callback, types.CallbackQuery):
+            await message_or_callback.message.answer(notification_text)
+        else:
+            await message_or_callback.answer(notification_text)
+    
+    return streak, is_new_day
+
+
 def get_day_word(n):
     """Return correct Russian word form for 'day' based on number."""
     if n % 10 == 1 and n % 100 != 11:
@@ -1901,24 +1925,8 @@ async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
     user_id = c.from_user.id
     
-    # Обновляем стрик и решаем, показывать ли уведомление
-    streak, is_new_day = update_streak(user_id)
-    show_notification = is_new_day and should_show_streak_notification(user_id)
-    
-    if show_notification:
-        # Show streak notification
-        mark_streak_notified(user_id)
-        logging.info(f"[menu_main_callback] Showing streak notification: user={user_id}, streak={streak}")
-        
-        streak_emoji = "🔥" * min(streak, 5)  # Show up to 5 fire emojis
-        await c.message.answer(
-            f"🎉 <b>Отличная работа!</b>\n\n"
-            f"{streak_emoji} Победная серия: <b>{streak} {get_day_word(streak)}</b>\n\n"
-            f"Тренируйся ежедневно и общайся как носитель! 💪",
-        )
-        
-        # Wait before showing menu
-        await asyncio.sleep(2)
+    # Check and show streak notification if needed
+    await check_and_show_streak_notification(user_id, c)
     
     try:
         await c.message.edit_text(
@@ -2886,12 +2894,12 @@ async def cb_grammar_rule(c: types.CallbackQuery):
 
 @dp.message_handler(commands=["profile"])
 async def cmd_profile(m: types.Message):
-    update_streak(m.from_user.id)
+    await check_and_show_streak_notification(m.from_user.id, m)
     await show_profile(m.from_user.id, m)
 
 @dp.callback_query_handler(lambda c: c.data == "mode:profile")
 async def cb_mode_profile(c: types.CallbackQuery):
-    update_streak(c.from_user.id)
+    await check_and_show_streak_notification(c.from_user.id, c)
     await c.answer()
     await show_profile(c.from_user.id, c.message)
 
@@ -2905,7 +2913,7 @@ def subscription_keyboard():
 
 @dp.callback_query_handler(lambda c: c.data == "profile_buy_unlimited")
 async def cb_profile_buy(c: types.CallbackQuery):
-    update_streak(c.from_user.id)
+    await check_and_show_streak_notification(c.from_user.id, c)
     log_event(c.from_user.id, "subscription_screen_opened", {})
     await c.answer()
     
@@ -3034,7 +3042,7 @@ async def cb_check_payment(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "profile_news_settings")
 async def cb_profile_news(c: types.CallbackQuery):
-    update_streak(c.from_user.id)
+    await check_and_show_streak_notification(c.from_user.id, c)
     await c.answer()
     # Reuse logic from cmd_newstopics
     set_user_mode(c.from_user.id, "news")
