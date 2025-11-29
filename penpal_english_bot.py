@@ -509,8 +509,10 @@ def get_session_id(user_id):
 # Streak helpers
 def update_streak(user_id):
     """Update user's streak based on today's activity. Returns (current_streak, is_new_day)."""
+    logging.error(f"[update_streak] ENTRY: user_id={user_id}")
     try:
         today = date.today()
+        logging.error(f"[update_streak] Got today: {today}")
         
         with closing(db()) as conn:
             c = conn.cursor()
