@@ -273,11 +273,13 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
             temperature=0.3,
         )
         text = resp.choices[0].message["content"]
-        logging.debug(f"Task check raw response: {text}")
+        logging.info(f"[check_task] OpenAI response: {text}")
         try:
             data = json.loads(text)
             # ensure keys
-            return {"done": bool(data.get("done")), "explanation": str(data.get("explanation", ""))}
+            result = {"done": bool(data.get("done")), "explanation": str(data.get("explanation", ""))}
+            logging.info(f"[check_task] Parsed result: {result}")
+            return result
         except Exception:
             # try to extract a JSON-like substring
             import re
@@ -286,23 +288,31 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
             if m:
                 try:
                     data = json.loads(m.group(0))
-                    return {"done": bool(data.get("done")), "explanation": str(data.get("explanation", ""))}
+                    result = {"done": bool(data.get("done")), "explanation": str(data.get("explanation", ""))}
+                    logging.info(f"[check_task] Extracted JSON result: {result}")
+                    return result
                 except Exception:
                     logging.exception("Failed to parse JSON from model task-check response")
     except Exception:
         logging.exception("check_task_completion OpenAI call failed")
 
-    # Fallback heuristic: simple substring match of 2-3 important words from task_text
+    # Fallback heuristic: simple substring match of important words from task_text
+    logging.info(f"[check_task] Using fallback heuristic for task: {task_text}")
     try:
         lowered = (user_text or "").lower()
         words = [w.strip('.,?!') for w in task_text.split() if len(w) > 3][:5]
         hits = sum(1 for w in words if w.lower() in lowered)
-        # More lenient: if user wrote something substantial (>10 chars) and has any keyword match
-        if len(user_text) > 10 and hits >= 1:
-            return {"done": True, "explanation": "(эвристика) найдено ключевое слово"}
+        logging.info(f"[check_task] Heuristic: text_len={len(user_text)}, keywords={words}, hits={hits}")
+        # Stricter: require at least 15 chars and 2+ keyword matches
+        if len(user_text) > 15 and hits >= 2:
+            result = {"done": True, "explanation": "(эвристика) найдено 2+ ключевых слова"}
+            logging.info(f"[check_task] Heuristic PASSED: {result}")
+            return result
     except Exception:
         pass
-    return {"done": False, "explanation": "(эвристика) не выполнено"}
+    result = {"done": False, "explanation": "(эвристика) не выполнено"}
+    logging.info(f"[check_task] Heuristic FAILED: {result}")
+    return result
 
 
 
@@ -3412,9 +3422,11 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     for task in tasks:
         if not task.get("done"):
             result = await check_task_completion(text, task["text"])
+            logging.info(f"[roleplay] Task check: user={user_id}, task='{task['text']}', result={result}")
             if result.get("done"):
                 task["done"] = True
                 session["completed_count"] = session.get("completed_count", 0) + 1
+                logging.info(f"[roleplay] Task completed! user={user_id}, completed_count={session['completed_count']}, task='{task['text']}'")
                 break
     
     # Increment turn counter
