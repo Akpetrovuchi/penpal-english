@@ -6,9 +6,11 @@ import psycopg2
 import psycopg2.extras
 import random
 import uuid
+import threading
 from datetime import datetime, date, timedelta
 from contextlib import closing
 from threading import Lock
+from collections import defaultdict
 import requests
 from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types
