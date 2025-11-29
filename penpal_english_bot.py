@@ -1,6 +1,23 @@
+# penpal_english_bot.py
+import os
+import json
+import logging
+import psycopg2
+import psycopg2.extras
+import random
 import uuid
-# --- Unified Event Logging (new structure) ---
+from datetime import datetime, date, timedelta
+from contextlib import closing
 from threading import Lock
+import requests
+from bs4 import BeautifulSoup
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
+from aiogram.utils import executor
+from dotenv import load_dotenv
+import openai
+
+# --- Unified Event Logging (new structure) ---
 USER_EVENT_SESSIONS = {}
 USER_EVENT_SESSIONS_LOCK = Lock()
 
@@ -41,23 +58,6 @@ def log_event(user_id, event_type, metadata=None, session_id=None):
             (str(event_id), user_id, event_type, metadata_json, str(session_id))
         )
         conn.commit()
-from datetime import date
-# penpal_english_bot.py
-import os
-import json
-import logging
-import psycopg2
-import psycopg2.extras
-import random
-from datetime import datetime, date
-from contextlib import closing
-import requests
-from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
-from aiogram.utils import executor
-from dotenv import load_dotenv
-import openai
 import hashlib
 from yookassa import Configuration, Payment as YooPayment
 try:
@@ -487,10 +487,7 @@ def init_db():
         """)
         
         conn.commit()
-import uuid
-import threading
-from collections import defaultdict
-from datetime import timedelta
+
 # Paywall helpers
 # In-memory session store: user_id -> (session_id, last_event_time)
 USER_SESSIONS = defaultdict(lambda: {'session_id': None, 'last_event_time': None})
