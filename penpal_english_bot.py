@@ -600,7 +600,7 @@ async def check_and_show_streak_notification(user_id, message_or_callback):
     
     if is_new_day and should_show_streak_notification(user_id):
         mark_streak_notified(user_id)
-        logging.info(f"[streak_notification] Showing for user={user_id}, streak={streak}")
+        logging.error(f"[streak_notification] Showing for user={user_id}, streak={streak}")
         
         streak_emoji = "🔥" * min(streak, 5)
         notification_text = (
