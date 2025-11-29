@@ -1882,7 +1882,12 @@ async def menu_main_callback(c: types.CallbackQuery):
     user_id = c.from_user.id
     
     # Update streak and check if we should show notification
-    streak, is_new_day = update_streak(user_id)
+    try:
+        streak, is_new_day = update_streak(user_id)
+    except (TypeError, ValueError):
+        # Fallback if update_streak returns None or invalid data
+        streak, is_new_day = 0, False
+    
     show_notification = is_new_day and should_show_streak_notification(user_id)
     
     if show_notification:
@@ -2114,7 +2119,12 @@ async def cmd_menu(m: types.Message):
     USER_CHAT_SESSIONS.pop(user_id, None)
     
     # Update streak and check if we should show notification
-    streak, is_new_day = update_streak(user_id)
+    try:
+        streak, is_new_day = update_streak(user_id)
+    except (TypeError, ValueError):
+        # Fallback if update_streak returns None or invalid data
+        streak, is_new_day = 0, False
+    
     show_notification = is_new_day and should_show_streak_notification(user_id)
     
     if show_notification:
@@ -3498,7 +3508,12 @@ async def handle_text_message(m: types.Message):
             USER_CHAT_SESSIONS.pop(user_id, None)
             
             # Update streak and check if we should show notification
-            streak, is_new_day = update_streak(user_id)
+            try:
+                streak, is_new_day = update_streak(user_id)
+            except (TypeError, ValueError):
+                # Fallback if update_streak returns None or invalid data
+                streak, is_new_day = 0, False
+            
             show_notification = is_new_day and should_show_streak_notification(user_id)
             
             if show_notification:
@@ -3573,7 +3588,12 @@ async def handle_roleplay_message(m: types.Message, session: dict):
         USER_CHAT_SESSIONS.pop(user_id, None)
         
         # Update streak and check if we should show notification
-        streak, is_new_day = update_streak(user_id)
+        try:
+            streak, is_new_day = update_streak(user_id)
+        except (TypeError, ValueError):
+            # Fallback if update_streak returns None or invalid data
+            streak, is_new_day = 0, False
+        
         show_notification = is_new_day and should_show_streak_notification(user_id)
         
         if show_notification:
