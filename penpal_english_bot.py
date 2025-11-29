@@ -1892,11 +1892,20 @@ async def menu_main_callback(c: types.CallbackQuery):
     
     # Update streak and check if we should show notification
     try:
-        streak, is_new_day = update_streak(user_id)
+        logging.info(f"[menu_main_callback] About to call update_streak for user={user_id}")
+        result = update_streak(user_id)
+        logging.info(f"[menu_main_callback] update_streak returned: {result}, type: {type(result)}")
+        
+        if result is None or not isinstance(result, tuple):
+            logging.error(f"[menu_main_callback] Invalid return from update_streak: {result}")
+            streak, is_new_day = 0, False
+        else:
+            streak, is_new_day = result
+            
         logging.info(f"[menu_main_callback] user={user_id}, streak={streak}, is_new_day={is_new_day}")
-    except (TypeError, ValueError) as e:
+    except Exception as e:
         # Fallback if update_streak returns None or invalid data
-        logging.error(f"[menu_main_callback] Error in update_streak for user={user_id}: {e}")
+        logging.error(f"[menu_main_callback] Exception in update_streak for user={user_id}: {type(e).__name__}: {e}")
         streak, is_new_day = 0, False
     
     show_notification = is_new_day and should_show_streak_notification(user_id)
