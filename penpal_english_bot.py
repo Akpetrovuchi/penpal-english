@@ -1226,6 +1226,8 @@ async def start(m: types.Message):
     try:
         sticker_file_id = "CAACAgIAAxkBAAILm2kq_J_TOkHArja22n1yyA1Z5wiNAAIYgwACMLFZSQy5VwJHiV9nNgQ"
         await m.answer_sticker(sticker_file_id)
+        # Wait 1.5 seconds before sending onboarding message
+        await asyncio.sleep(1.5)
     except Exception:
         logging.exception("Failed to send welcome sticker")
     
