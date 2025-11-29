@@ -563,6 +563,7 @@ def update_streak(user_id):
             
     except Exception as e:
         logging.error(f"[update_streak] ERROR for user={user_id}: {e}")
+        return (0, False)
         import traceback
         logging.error(traceback.format_exc())
         return (0, False)
