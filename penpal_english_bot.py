@@ -1,25 +1,6 @@
-# penpal_english_bot.py
-import os
-import json
-import logging
-import psycopg2
-import psycopg2.extras
-import random
 import uuid
-import threading
-from datetime import datetime, date, timedelta
-from contextlib import closing
-from threading import Lock
-from collections import defaultdict
-import requests
-from bs4 import BeautifulSoup
-from aiogram import Bot, Dispatcher, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
-from aiogram.utils import executor
-from dotenv import load_dotenv
-import openai
-
 # --- Unified Event Logging (new structure) ---
+from threading import Lock
 USER_EVENT_SESSIONS = {}
 USER_EVENT_SESSIONS_LOCK = Lock()
 
@@ -60,6 +41,23 @@ def log_event(user_id, event_type, metadata=None, session_id=None):
             (str(event_id), user_id, event_type, metadata_json, str(session_id))
         )
         conn.commit()
+from datetime import date
+# penpal_english_bot.py
+import os
+import json
+import logging
+import psycopg2
+import psycopg2.extras
+import random
+from datetime import datetime, date
+from contextlib import closing
+import requests
+from bs4 import BeautifulSoup
+from aiogram import Bot, Dispatcher, types
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, LabeledPrice
+from aiogram.utils import executor
+from dotenv import load_dotenv
+import openai
 import hashlib
 from yookassa import Configuration, Payment as YooPayment
 try:
@@ -222,7 +220,7 @@ def make_tasks_for_topic(topic):
 PERSONA_PROMPTS = {
     "interview": "You are a hiring manager conducting a short job interview. Your name is Sarah Mitchell. Speak as a polite, professional manager in English. Introduce yourself very briefly (1 sentence) and then ask a specific interview question to start. Be concise.",
     "restaurant": "You are a friendly restaurant waiter. Greet the customer in English very briefly (1 sentence), and ask what they would like to order. Keep it casual and helpful.",
-    "raise": "You are the user's manager. Your name is Michael Thompson. Start the conversation professionally in English: introduce yourself very briefly (1 sentence), ask why the employee thinks they deserve a raise.",
+    "raise": "You are the user's manager. Start the conversation professionally in English: introduce yourself very briefly (1 sentence), ask why the employee thinks they deserve a raise.",
     "travel": "You are a travel agent. Greet the customer in English very briefly (1 sentence), and ask about destination and travel dates.",
     "free": "You are a friendly conversation partner. Greet the user in English very briefly (1 sentence), and ask an open question to start a chat.",
 }
@@ -262,11 +260,8 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
     try:
         prompt = (
             "You are a friendly English teacher evaluating task completion.\n"
-            "Mark done=true only if the user gave a meaningful, relevant answer.\n"
-            "Requirements:\n"
-            "- The answer directly addresses the task (not off-topic)\n"
-            "- It's a genuine attempt (not a joke, nonsense, or single word like 'smoking')\n"
-            "- It shows effort (at least one complete sentence)\n\n"
+            "Determine whether the user made a reasonable attempt to fulfill the task.\n"
+            "Be lenient: if they addressed the topic and made an effort, consider it done.\n\n"
             f"Task: {task_text}\n\n"
             f"User reply: {user_text}\n\n"
             "Answer with strict JSON only, no extra text.\n"
@@ -278,12 +273,12 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
             temperature=0.3,
         )
         text = resp.choices[0].message["content"]
-        print(f"[check_task] OpenAI response: {text}", flush=True)
+        logging.info(f"[check_task] OpenAI response: {text}")
         try:
             data = json.loads(text)
             # ensure keys
             result = {"done": bool(data.get("done")), "explanation": str(data.get("explanation", ""))}
-            print(f"[check_task] Parsed result: {result}", flush=True)
+            logging.info(f"[check_task] Parsed result: {result}")
             return result
         except Exception:
             # try to extract a JSON-like substring
@@ -294,7 +289,7 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
                 try:
                     data = json.loads(m.group(0))
                     result = {"done": bool(data.get("done")), "explanation": str(data.get("explanation", ""))}
-                    print(f"[check_task] Extracted JSON result: {result}", flush=True)
+                    logging.info(f"[check_task] Extracted JSON result: {result}")
                     return result
                 except Exception:
                     logging.exception("Failed to parse JSON from model task-check response")
@@ -302,16 +297,16 @@ async def check_task_completion(user_text: str, task_text: str) -> dict:
         logging.exception("check_task_completion OpenAI call failed")
 
     # Fallback heuristic: simple substring match of important words from task_text
-    print(f"[check_task] Using fallback heuristic for task: {task_text}", flush=True)
+    logging.info(f"[check_task] Using fallback heuristic for task: {task_text}")
     try:
         lowered = (user_text or "").lower()
         words = [w.strip('.,?!') for w in task_text.split() if len(w) > 3][:5]
         hits = sum(1 for w in words if w.lower() in lowered)
-        print(f"[check_task] Heuristic: text_len={len(user_text)}, keywords={words}, hits={hits}", flush=True)
+        logging.info(f"[check_task] Heuristic: text_len={len(user_text)}, keywords={words}, hits={hits}")
         # Stricter: require at least 15 chars and 2+ keyword matches
         if len(user_text) > 15 and hits >= 2:
             result = {"done": True, "explanation": "(эвристика) найдено 2+ ключевых слова"}
-            print(f"[check_task] Heuristic PASSED: {result}", flush=True)
+            logging.info(f"[check_task] Heuristic PASSED: {result}")
             return result
     except Exception:
         pass
@@ -479,17 +474,11 @@ def init_db():
             metadata JSONB
         )
         """)
-        
-        # Add streak fields if they don't exist
-        c.execute("""
-        ALTER TABLE users 
-        ADD COLUMN IF NOT EXISTS current_streak INTEGER DEFAULT 0,
-        ADD COLUMN IF NOT EXISTS last_activity_date DATE,
-        ADD COLUMN IF NOT EXISTS streak_notified_today BOOLEAN DEFAULT FALSE
-        """)
-        
         conn.commit()
-
+import uuid
+import threading
+from collections import defaultdict
+from datetime import timedelta
 # Paywall helpers
 # In-memory session store: user_id -> (session_id, last_event_time)
 USER_SESSIONS = defaultdict(lambda: {'session_id': None, 'last_event_time': None})
@@ -504,128 +493,6 @@ def get_session_id(user_id):
             sess['session_id'] = uuid.uuid4()
         sess['last_event_time'] = now
         return sess['session_id']
-
-
-# Streak helpers
-def update_streak(user_id):
-    """Update user's streak based on today's activity. Returns (streak_count, is_new_day)."""
-    logging.error(f"[update_streak] ENTRY: user_id={user_id}")
-    try:
-        today = date.today()
-        logging.error(f"[update_streak] Got today: {today}")
-        
-        with closing(db()) as conn:
-            c = conn.cursor()
-            c.execute("""
-                SELECT streak_count, last_active_date, max_streak, streak_notified_today 
-                FROM users WHERE id=%s
-            """, (user_id,))
-            row = c.fetchone()
-            
-            if not row:
-                logging.error(f"[update_streak] No user found with id={user_id}")
-                return (0, False)
-                
-            streak_count, last_active_date, max_streak, streak_notified_today = row
-            
-            # Default values
-            if streak_count is None:
-                streak_count = 0
-            if max_streak is None:
-                max_streak = 0
-            
-            # Calculate new streak
-            if last_active_date is None:
-                # First time user
-                new_streak = 1
-                is_new_day = True
-            elif last_active_date == today:
-                # Same day - no change
-                new_streak = streak_count
-                is_new_day = False
-            elif last_active_date == today - timedelta(days=1):
-                # Consecutive day - increment
-                new_streak = streak_count + 1
-                is_new_day = True
-            else:
-                # Gap - reset to 1
-                new_streak = 1
-                is_new_day = True
-            
-            # Update max_streak if needed
-            new_max_streak = max(max_streak, new_streak)
-            
-            # Update database
-            c.execute("""
-                UPDATE users 
-                SET streak_count = %s, 
-                    last_active_date = %s,
-                    max_streak = %s,
-                    streak_notified_today = CASE WHEN %s THEN FALSE ELSE streak_notified_today END
-                WHERE id=%s
-            """, (new_streak, today, new_max_streak, is_new_day, user_id))
-            conn.commit()
-            
-            logging.error(f"[update_streak] user={user_id}, streak={new_streak}, max={new_max_streak}, is_new_day={is_new_day}")
-            return (new_streak, is_new_day)
-            
-    except Exception as e:
-        logging.error(f"[update_streak] ERROR for user={user_id}: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
-        return (0, False)
-        return (0, False)
-
-
-def should_show_streak_notification(user_id):
-    """Check if we should show streak notification today."""
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("SELECT streak_notified_today FROM users WHERE id=%s", (user_id,))
-        row = c.fetchone()
-        return row and not row[0]
-
-
-def mark_streak_notified(user_id):
-    """Mark that we've shown streak notification today."""
-    with closing(db()) as conn:
-        c = conn.cursor()
-        c.execute("UPDATE users SET streak_notified_today = TRUE WHERE id=%s", (user_id,))
-        conn.commit()
-
-
-async def check_and_show_streak_notification(user_id, message_or_callback):
-    """Update streak and show notification if needed. Call this at the start of any user interaction."""
-    streak, is_new_day = update_streak(user_id)
-    
-    if is_new_day and should_show_streak_notification(user_id):
-        mark_streak_notified(user_id)
-        logging.error(f"[streak_notification] Showing for user={user_id}, streak={streak}")
-        
-        streak_emoji = "🔥" * min(streak, 5)
-        notification_text = (
-            f"🎉 <b>Отличная работа!</b>\n\n"
-            f"{streak_emoji} Победная серия продлена: <b>{streak} {get_day_word(streak)}</b>\n\n"
-            f"Продолжай тренироваться каждый день! 💪"
-        )
-        
-        # Determine whether to use message or callback
-        if isinstance(message_or_callback, types.CallbackQuery):
-            await message_or_callback.message.answer(notification_text)
-        else:
-            await message_or_callback.answer(notification_text)
-    
-    return streak, is_new_day
-
-
-def get_day_word(n):
-    """Return correct Russian word form for 'day' based on number."""
-    if n % 10 == 1 and n % 100 != 11:
-        return "день"
-    elif 2 <= n % 10 <= 4 and (n % 100 < 10 or n % 100 >= 20):
-        return "дня"
-    else:
-        return "дней"
 
 
 # Daily sent helpers
@@ -1351,16 +1218,6 @@ async def start(m: types.Message):
     save_user(m.from_user.id, m.from_user.username or "")
     save_msg(m.from_user.id, "user", "/start")
     log_event(m.from_user.id, "onboarding_started", {})
-    
-    # Send welcome sticker
-    try:
-        sticker_file_id = "CAACAgIAAxkBAAILm2kq_J_TOkHArja22n1yyA1Z5wiNAAIYgwACMLFZSQy5VwJHiV9nNgQ"
-        await m.answer_sticker(sticker_file_id)
-        # Wait 1.5 seconds before sending onboarding message
-        await asyncio.sleep(1.5)
-    except Exception:
-        logging.exception("Failed to send welcome sticker")
-    
     # Reset topics and onboarding fields for this user
     try:
         set_user_topics(m.from_user.id, [])
@@ -1371,6 +1228,15 @@ async def start(m: types.Message):
     except Exception:
         logging.exception("Failed to reset user topics/onboarding on /start")
     try:
+        # Send welcome sticker first (non-fatal)
+        try:
+            sticker_file_id = "CAACAgIAAxkBAAILm2kq_J_TOkHArja22n1yyA1Z5wiNAAIYgwACMLFZSQy5VwJHiV9nNgQ"
+            await m.answer_sticker(sticker_file_id)
+            # small delay to avoid flooding and keep UX smooth
+            await asyncio.sleep(1.5)
+        except Exception:
+            logging.exception("Failed to send welcome sticker")
+
         await m.answer(
             "Супер, ты на шаг ближе к цели 🎯\n\nПеред тем как начнём, расскажи немного о себе:\n\n<b>Какая твоя главная цель в изучении английского?</b>",
             reply_markup=onboarding_goal_kb(),
@@ -1537,11 +1403,9 @@ async def choose_chat_topic(c: types.CallbackQuery):
         "free": "Свободное общение 🗣️",
     }
     topic_name = names.get(topic_key, topic_key)
-    # start a session with 3 required tasks to complete
+    # start a session with 2 required tasks to complete
     tasks = make_tasks_for_topic(topic_key)
-    # Take only first 3 tasks
-    tasks = tasks[:3]
-    # we will require 3 tasks to be completed
+    # we will require 2 tasks to be completed (or all if fewer)
     USER_CHAT_SESSIONS[user_id] = {
         "type": "roleplay",
         "topic": topic_key,
@@ -1551,8 +1415,8 @@ async def choose_chat_topic(c: types.CallbackQuery):
     }
     # show rules and first tasks
     await c.answer()
-    intro = f"Тема: {topic_name}\n\nПравила: Выполни 3 задания или скажи bye 👋, чтобы завершить диалог."
-    tasks_list = "\n".join([f"{t['id']}) {t['text']}" for t in tasks])
+    intro = f"Тема: {topic_name}\n\nПравила: Выполни 2 задания или скажи bye 👋, чтобы завершить диалог."
+    tasks_list = "\n".join([f"{t['id']}) {t['text']}" for t in tasks[:3]])
     # Ask the language model to play the persona and produce a short intro (in English)
     persona = PERSONA_PROMPTS.get(topic_key, PERSONA_PROMPTS.get("free"))
     try:
@@ -1923,11 +1787,6 @@ async def news_next(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "menu:main")
 async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
-    user_id = c.from_user.id
-    
-    # Check and show streak notification if needed
-    await check_and_show_streak_notification(user_id, c)
-    
     try:
         await c.message.edit_text(
             "Меню активности — выбери, что хочешь сделать:",
@@ -1940,7 +1799,7 @@ async def menu_main_callback(c: types.CallbackQuery):
             reply_markup=mode_keyboard()
         )
     # Also clear active chat topic session when user returns to menu from callbacks
-    USER_CHAT_SESSIONS.pop(user_id, None)
+    USER_CHAT_SESSIONS.pop(c.from_user.id, None)
 
 
 @dp.message_handler(commands=["topics"])
@@ -2136,15 +1995,10 @@ async def cmd_help(m: types.Message):
 @dp.message_handler(commands=["menu"])
 async def cmd_menu(m: types.Message):
     save_msg(m.from_user.id, "user", "/menu")
-    user_id = m.from_user.id
-    session_id = get_session_id(user_id)
-    log_event(user_id, "command_used", {"command": "/menu"})
+    session_id = get_session_id(m.from_user.id)
+    log_event(m.from_user.id, "command_used", {"command": "/menu"})
     # From the main menu there should be no active chat topic session
-    USER_CHAT_SESSIONS.pop(user_id, None)
-    
-    # Check and show streak notification if needed
-    await check_and_show_streak_notification(user_id, m)
-    
+    USER_CHAT_SESSIONS.pop(m.from_user.id, None)
     await m.answer(
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
@@ -2879,12 +2733,12 @@ async def cb_grammar_rule(c: types.CallbackQuery):
 
 @dp.message_handler(commands=["profile"])
 async def cmd_profile(m: types.Message):
-    await check_and_show_streak_notification(m.from_user.id, m)
+    update_streak(m.from_user.id)
     await show_profile(m.from_user.id, m)
 
 @dp.callback_query_handler(lambda c: c.data == "mode:profile")
 async def cb_mode_profile(c: types.CallbackQuery):
-    await check_and_show_streak_notification(c.from_user.id, c)
+    update_streak(c.from_user.id)
     await c.answer()
     await show_profile(c.from_user.id, c.message)
 
@@ -2898,7 +2752,7 @@ def subscription_keyboard():
 
 @dp.callback_query_handler(lambda c: c.data == "profile_buy_unlimited")
 async def cb_profile_buy(c: types.CallbackQuery):
-    await check_and_show_streak_notification(c.from_user.id, c)
+    update_streak(c.from_user.id)
     log_event(c.from_user.id, "subscription_screen_opened", {})
     await c.answer()
     
@@ -3027,7 +2881,7 @@ async def cb_check_payment(c: types.CallbackQuery):
 
 @dp.callback_query_handler(lambda c: c.data == "profile_news_settings")
 async def cb_profile_news(c: types.CallbackQuery):
-    await check_and_show_streak_notification(c.from_user.id, c)
+    update_streak(c.from_user.id)
     await c.answer()
     # Reuse logic from cmd_newstopics
     set_user_mode(c.from_user.id, "news")
@@ -3109,6 +2963,49 @@ def init_game_tables():
         logging.error(f"Failed to init game tables: {e}")
 
 # Helper functions for Profile, Streak, and Dictionary features
+
+def update_streak(user_id):
+    """
+    Updates user streak based on last_active_date.
+    Called from callback handlers that don't use save_msg.
+    Skips DB write if already updated today.
+    """
+    today = date.today()
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("SELECT streak_count, last_active_date, max_streak FROM users WHERE id=%s", (user_id,))
+        row = c.fetchone()
+        
+        if not row:
+            return # User not found or not initialized
+
+        streak_count = row[0] or 0
+        last_active = row[1] # date object or None
+        max_streak = row[2] or 0
+        
+        # Skip if already updated today
+        if last_active == today:
+            return
+        
+        new_streak = streak_count
+        new_max = max_streak
+        
+        if last_active is None:
+            new_streak = 1
+            new_max = max(new_max, 1)
+        elif last_active == today - timedelta(days=1):
+            new_streak += 1
+            new_max = max(new_max, new_streak)
+        else:
+            new_streak = 1 # Streak broken
+            
+        # Update DB
+        c.execute("""
+            UPDATE users 
+            SET streak_count=%s, last_active_date=%s, max_streak=%s 
+            WHERE id=%s
+        """, (new_streak, today, new_max, user_id))
+        conn.commit()
 
 async def maybe_add_to_dictionary(m: types.Message):
     """
@@ -3467,10 +3364,6 @@ async def handle_text_message(m: types.Message):
             elif session_type == "roleplay":
                 log_event(user_id, "chat_closed", {"topic": session.get("topic")})
             USER_CHAT_SESSIONS.pop(user_id, None)
-            
-            # Check and show streak notification if needed
-            await check_and_show_streak_notification(user_id, m)
-            
             await m.answer(
                 "Хорошая работа! Возвращаю тебя в меню 🏠",
                 reply_markup=mode_keyboard()
@@ -3527,10 +3420,6 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     if text.lower() in ["bye", "goodbye", "пока", "выход"]:
         completed = session.get("completed_count", 0)
         USER_CHAT_SESSIONS.pop(user_id, None)
-        
-        # Check and show streak notification if needed
-        await check_and_show_streak_notification(user_id, m)
-        
         await m.answer(
             f"Диалог завершён! 👋\n\nВыполнено заданий: {completed}\n\nВозвращайся, когда захочешь попрактиковаться ещё!",
             reply_markup=mode_keyboard()
@@ -3542,17 +3431,11 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     for task in tasks:
         if not task.get("done"):
             result = await check_task_completion(text, task["text"])
-            print(f"[roleplay] Task check: user={user_id}, task='{task['text']}', result={result}", flush=True)
+            logging.info(f"[roleplay] Task check: user={user_id}, task='{task['text']}', result={result}")
             if result.get("done"):
                 task["done"] = True
                 session["completed_count"] = session.get("completed_count", 0) + 1
-                print(f"[roleplay] Task completed! user={user_id}, completed_count={session['completed_count']}, task='{task['text']}'", flush=True)
-                # Log task completion event
-                log_event(user_id, "task_completed", {
-                    "topic": topic_key,
-                    "task": task["text"],
-                    "completed_count": session["completed_count"]
-                })
+                logging.info(f"[roleplay] Task completed! user={user_id}, completed_count={session['completed_count']}, task='{task['text']}'")
                 break
     
     # Increment turn counter
@@ -3893,6 +3776,5 @@ if __name__ == '__main__':
     else:
         # Local development: polling only
         logging.info("Starting bot in POLLING mode (local development)")
-
         executor.start_polling(dp, skip_updates=True)
 
