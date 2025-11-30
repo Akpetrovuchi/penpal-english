@@ -25,6 +25,13 @@ penpal.sqlite
 run/
 *.pid
 
+# Logs, dumps and backups
+*.log
+nohup.out
+*.sql
+*.bak
+logs/
+
 # VSCode
 .vscode/
 
