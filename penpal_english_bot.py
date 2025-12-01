@@ -69,6 +69,16 @@ except Exception:
 import asyncio
 import copy
 
+# Voice processing module
+from services.voice_processing import (
+    download_voice_file,
+    transcribe_audio,
+    analyze_voice_text,
+    format_voice_feedback,
+    format_text_feedback,
+    cleanup_voice_file
+)
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -567,13 +577,14 @@ def get_user_chat_messages_count_today(user_id):
         c = conn.cursor()
         # Count only real user messages, not commands or callback data
         # Callback data is short (< 50 chars), contains ':' and no spaces
+        # Note: %% escapes % in psycopg2
         c.execute("""
             SELECT COUNT(*) FROM messages 
             WHERE user_id = %s 
               AND role = 'user' 
               AND created_at::date = %s
-              AND content NOT LIKE '/%'
-              AND NOT (LENGTH(content) < 50 AND content LIKE '%:%' AND content NOT LIKE '% %')
+              AND content NOT LIKE '/%%'
+              AND NOT (LENGTH(content) < 50 AND content LIKE '%%:%%' AND content NOT LIKE '%% %%')
         """, (user_id, today))
         row = c.fetchone()
     return row[0] if row else 0
@@ -1329,7 +1340,10 @@ async def choose_level(c: types.CallbackQuery):
     set_user_mode(user_id, None)
     await c.answer()
     await c.message.edit_text(
-        f"Отлично! Уровень установлен: <b>{level}</b> 🎯\n\nС чего начнем?",
+        f"Отлично! Уровень установлен: <b>{level}</b> 🎯\n\n"
+        "🎤 Ты можешь общаться с Максом <b>текстом или голосом</b> — "
+        "я пойму тебя и дам подробный анализ твоего английского!\n\n"
+        "Выбери режим или просто запиши голосовое на любую тему — я поддержу 💬",
         reply_markup=mode_keyboard(),
     )
 
@@ -1435,7 +1449,7 @@ async def choose_chat_topic(c: types.CallbackQuery):
     }
     # show rules and first tasks
     await c.answer()
-    intro = f"Тема: {topic_name}\n\nПравила: Выполни 2 задания или скажи bye 👋, чтобы завершить диалог."
+    intro = f"Тема: {topic_name}\n\n📝 Отвечай <b>текстом или голосом</b> — я пойму!\n\n🎯 Выполни 3 задания или скажи bye 👋, чтобы завершить диалог."
     tasks_list = "\n".join([f"{t['id']}) {t['text']}" for t in tasks[:3]])
     # Ask the language model to play the persona and produce a short intro (in English)
     persona = PERSONA_PROMPTS.get(topic_key, PERSONA_PROMPTS.get("free"))
@@ -1612,7 +1626,10 @@ async def finalize_word_selection(c: types.CallbackQuery):
     set_user_mode(uid, None)
     await c.answer()
     await c.message.edit_text(
-        f"Готово — по твоему выбору ({count} слов) уровень определён как <b>{level}</b>.\n\nС чего начнем?",
+        f"Готово — по твоему выбору ({count} слов) уровень определён как <b>{level}</b>.\n\n"
+        "🎤 Ты можешь общаться с Максом <b>текстом или голосом</b> — "
+        "я пойму тебя и дам подробный анализ твоего английского!\n\n"
+        "Выбери режим или просто запиши голосовое на любую тему — я поддержу 💬",
         reply_markup=mode_keyboard(),
     )
 
@@ -1746,7 +1763,9 @@ async def news_done(c: types.CallbackQuery):
     # Send only the first question with instructions and an 'Another question' button
     q0 = questions[0]
     instr = (
-        "Отлично - ты прочитал(а) статью! Чтобы выполнить задание - ответь на три вопроса или напиши bye 👋\n\n"
+        "Отлично — ты прочитал(а) статью! 🎉\n\n"
+        "📝 Отвечай <b>текстом или голосом</b> — я пойму!\n\n"
+        "🎯 Ответь на 3 вопроса или напиши bye 👋\n\n"
     )
 
     # Initialize news session
@@ -3403,6 +3422,128 @@ async def handle_training_answer(c: types.CallbackQuery):
     await send_training_question(c.message, user_id)
 
 
+# --- Voice message handler ---
+@dp.message_handler(content_types=types.ContentTypes.VOICE)
+async def handle_voice_message(m: types.Message):
+    """
+    Handle voice messages from users.
+    1. Download voice file
+    2. Transcribe with Whisper API
+    3. Analyze grammar/vocabulary with GPT
+    4. Return feedback to user
+    5. Continue active session (roleplay/news) with transcribed text
+    """
+    user_id = m.from_user.id
+    
+    # Log event: voice received
+    log_event(user_id, "voice_received", {
+        "file_id": m.voice.file_id,
+        "duration": m.voice.duration,
+        "file_size": m.voice.file_size
+    })
+    
+    logging.info(f"[voice] Received voice message from user={user_id}, duration={m.voice.duration}s")
+    
+    # Send "processing" message
+    processing_msg = await m.reply("🎧 Распознаю голосовое сообщение...")
+    
+    file_path = None
+    transcribed_text = None
+    try:
+        # Step 1: Download voice file
+        file_path, error = await download_voice_file(bot, m)
+        if error:
+            await processing_msg.edit_text(f"❌ Не удалось загрузить голосовое сообщение: {error}")
+            log_event(user_id, "voice_error", {"stage": "download", "error": error})
+            return
+        
+        # Step 2: Transcribe with Whisper
+        await processing_msg.edit_text("🎧 Расшифровываю речь...")
+        
+        transcribed_text, error = await transcribe_audio(file_path)
+        if error:
+            await processing_msg.edit_text(
+                "😕 Не удалось распознать речь.\n\n"
+                "Попробуй:\n"
+                "• Говорить чётче и ближе к микрофону\n"
+                "• Записать в тихом месте\n"
+                "• Говорить на английском"
+            )
+            log_event(user_id, "voice_error", {"stage": "transcribe", "error": error})
+            return
+        
+        # Log successful transcription
+        log_event(user_id, "voice_transcribed", {"text_length": len(transcribed_text)})
+        
+        # Step 3: Analyze text
+        await processing_msg.edit_text("🔍 Анализирую твой английский...")
+        
+        # Get user level for personalized feedback
+        user = get_user(user_id)
+        user_level = user.get("level", "B1") if user else "B1"
+        
+        analysis = await analyze_voice_text(transcribed_text, user_level)
+        
+        # Log analysis
+        log_event(user_id, "voice_analyzed", {
+            "score": analysis.get("score", 0),
+            "has_errors": analysis.get("has_errors", False)
+        })
+        
+        # Step 4: Format and send feedback
+        feedback_text = format_voice_feedback(analysis)
+        
+        # Check if user is in a session
+        session = USER_CHAT_SESSIONS.get(user_id)
+        
+        # Delete processing message and send feedback
+        await processing_msg.delete()
+        await m.reply(feedback_text)
+        
+        # Step 5: Continue session if active
+        if session:
+            session_type = session.get("type")
+            
+            if session_type == "roleplay":
+                # Save transcribed text as user message and continue roleplay
+                save_msg(user_id, "user", transcribed_text)
+                await process_roleplay_text(m, session, transcribed_text)
+                
+            elif session_type == "news":
+                # Save transcribed text as user message and continue news discussion
+                save_msg(user_id, "user", transcribed_text)
+                await process_news_discussion_text(m, session, transcribed_text)
+            else:
+                # Unknown session type - just show menu hint
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton("🗣 Разговоры", callback_data="mode:chat")],
+                    [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+                ])
+                await m.answer("💡 <i>Практикуй разговорный английский в режиме «Разговоры»!</i>", reply_markup=kb)
+        else:
+            # Not in session - suggest modes
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("🗣 Разговоры", callback_data="mode:chat")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+            await m.answer("💡 <i>Практикуй разговорный английский в режиме «Разговоры»!</i>", reply_markup=kb)
+        
+        logging.info(f"[voice] Successfully processed voice for user={user_id}, score={analysis.get('score', 0)}")
+        
+    except Exception as e:
+        logging.exception(f"[voice] Unexpected error processing voice for user={user_id}: {e}")
+        await processing_msg.edit_text(
+            "😔 Произошла ошибка при обработке голосового сообщения.\n"
+            "Попробуй ещё раз позже."
+        )
+        log_event(user_id, "voice_error", {"stage": "unknown", "error": str(e)})
+    
+    finally:
+        # Cleanup temp file
+        if file_path:
+            cleanup_voice_file(file_path)
+
+
 # --- Text message handler (must be last!) ---
 @dp.message_handler(content_types=types.ContentTypes.TEXT)
 async def handle_text_message(m: types.Message):
@@ -3473,6 +3614,193 @@ async def handle_text_message(m: types.Message):
     await handle_general_chat(m)
 
 
+# --- Voice-to-text session handlers ---
+# These functions process transcribed voice text in active sessions
+# without requiring m.text (since voice messages don't have text attribute)
+
+async def process_roleplay_text(m: types.Message, session: dict, text: str):
+    """
+    Process transcribed voice text in roleplay mode.
+    Similar to handle_roleplay_message but accepts text as parameter.
+    Note: paywall check and save_msg are done in voice handler before calling this.
+    """
+    user_id = m.from_user.id
+    topic_key = session.get("topic", "free")
+    
+    # Check if user wants to end the session
+    if text.lower() in ["bye", "goodbye", "пока", "выход"]:
+        completed = session.get("completed_count", 0)
+        USER_CHAT_SESSIONS.pop(user_id, None)
+        await check_and_show_streak_notification(user_id, bot, user_id)
+        await m.answer(
+            f"Диалог завершён! 👋\n\nВыполнено заданий: {completed}\n\nВозвращайся, когда захочешь попрактиковаться ещё!",
+            reply_markup=mode_keyboard()
+        )
+        return
+    
+    # Check task completion
+    tasks = session.get("tasks", [])
+    for task in tasks:
+        if not task.get("done"):
+            result = await check_task_completion(text, task["text"])
+            logging.info(f"[roleplay:voice] Task check: user={user_id}, task='{task['text']}', result={result}")
+            if result.get("done"):
+                task["done"] = True
+                session["completed_count"] = session.get("completed_count", 0) + 1
+                logging.info(f"[roleplay:voice] Task completed! user={user_id}, completed_count={session['completed_count']}'")
+                break
+    
+    # Increment turn counter
+    session["turns"] = session.get("turns", 0) + 1
+    
+    # Build context for GPT
+    persona = PERSONA_PROMPTS.get(topic_key, PERSONA_PROMPTS.get("free"))
+    
+    # Get recent messages from DB for context
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 10",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+    
+    # For voice: don't ask GPT to correct grammar (already done in voice feedback)
+    messages = [{"role": "system", "content": persona + "\n\nKeep your responses concise (2-3 sentences). The user sent a voice message which was already analyzed for grammar, so just respond naturally to continue the conversation."}]
+    
+    # Add conversation history (reversed to chronological order)
+    for row in reversed(rows):
+        role = "assistant" if row[0] == "assistant" else "user"
+        messages.append({"role": role, "content": row[1]})
+    
+    # Generate response
+    try:
+        response = await gpt_chat(messages)
+    except Exception:
+        logging.exception("GPT chat failed in roleplay voice")
+        response = "Sorry, I'm having trouble responding right now. Please try again."
+    
+    # Save assistant response
+    save_msg(user_id, "assistant", response)
+    
+    # Check if 3 tasks completed
+    completed_count = session.get("completed_count", 0)
+    pending_tasks = [t for t in tasks if not t.get("done")][:3]
+    
+    emoji = persona_emoji(topic_key)
+    full_response = f"{emoji} {response}"
+    
+    if pending_tasks and completed_count < 3:
+        tasks_text = "\n".join([f"• {t['text']}" for t in pending_tasks])
+        full_response += f"\n\n<i>Осталось:</i>\n{tasks_text}"
+    
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    await m.answer(full_response, reply_markup=kb)
+    
+    # Completion message if 3 tasks done
+    if completed_count >= 3 and not session.get("completion_shown"):
+        session["completion_shown"] = True
+        log_event(user_id, "topic_completed", {"topic": topic_key, "turns": session.get("turns", 0)})
+        
+        completion_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+        await m.answer(
+            "🎉 <b>Отличная работа! Ты выполнил(а) 3 задания.</b>\n\n"
+            "Ты можешь продолжить диалог или вернуться в меню.",
+            reply_markup=completion_kb
+        )
+
+
+async def process_news_discussion_text(m: types.Message, session: dict, text: str):
+    """
+    Process transcribed voice text in news discussion mode.
+    Similar to handle_news_discussion but accepts text as parameter.
+    Note: save_msg is done in voice handler before calling this.
+    """
+    user_id = m.from_user.id
+    cache_id = session.get("cache_id")
+    
+    # Increment answer count
+    session["answers_count"] = session.get("answers_count", 0) + 1
+    answers_count = session["answers_count"]
+    
+    # Get article info for context
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT title, summary, questions FROM news_cache WHERE id=%s", (cache_id,))
+        row = cur.fetchone()
+    
+    if not row:
+        await m.answer("Не удалось найти статью. Попробуй /news для новой статьи.")
+        USER_CHAT_SESSIONS.pop(user_id, None)
+        return
+    
+    title, summary, questions_json = row
+    questions = json.loads(questions_json or "[]")
+    current_q_index = session.get("last_q_index", 0)
+    current_question = questions[current_q_index] if current_q_index < len(questions) else ""
+    
+    # Get user level
+    user = get_user(user_id)
+    level = user.get("level", "B1") if user else "B1"
+    
+    # Build context for GPT - don't duplicate grammar correction (already done in voice feedback)
+    system_prompt = f"""You are an English tutor discussing a news article with a student.
+Article title: {title}
+Article summary: {summary}
+Current question being discussed: {current_question}
+
+Your task:
+1. Respond naturally to their answer about the article
+2. Ask a follow-up question to keep the conversation going
+3. Keep responses concise (2-3 sentences)
+4. Adapt your language to {level} level
+
+Note: The student sent a voice message which was already analyzed for grammar, so just continue the discussion naturally."""
+
+    # Get recent messages for context
+    with closing(db()) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT role, content FROM messages WHERE user_id=%s ORDER BY id DESC LIMIT 10",
+            (user_id,)
+        )
+        rows = cur.fetchall()
+    
+    messages = [{"role": "system", "content": system_prompt}]
+    for row in reversed(rows):
+        role = "assistant" if row[0] == "assistant" else "user"
+        messages.append({"role": role, "content": row[1]})
+    
+    # Generate response
+    try:
+        response = await gpt_chat(messages)
+    except Exception:
+        logging.exception("GPT chat failed in news discussion voice")
+        response = "Interesting point! Could you tell me more about what you think?"
+    
+    # Save assistant response
+    save_msg(user_id, "assistant", response)
+    
+    kb = InlineKeyboardMarkup().add(InlineKeyboardButton("Перевести 🔁", callback_data="translate:chat"))
+    await m.answer(response, reply_markup=kb)
+    
+    # Completion message if 3 answers done
+    if answers_count >= 3 and not session.get("completion_shown"):
+        session["completion_shown"] = True
+        log_event(user_id, "reading_completed", {"cache_id": cache_id})
+        
+        completion_kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+        await m.answer(
+            "🎉 <b>Отличная работа! Ты ответил(а) на 3 вопроса.</b>\n\n"
+            "Ты можешь продолжить диалог или вернуться в меню.",
+            reply_markup=completion_kb
+        )
+
+
 async def handle_roleplay_message(m: types.Message, session: dict):
     """Handle message in roleplay mode."""
     user_id = m.from_user.id
@@ -3534,7 +3862,17 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     # Increment turn counter
     session["turns"] = session.get("turns", 0) + 1
     
-    # Build context for GPT
+    # Step 1: Analyze user's text and send feedback first
+    user = get_user(user_id)
+    user_level = user.get("level", "B1") if user else "B1"
+    
+    analysis = await analyze_voice_text(text, user_level)
+    feedback_text = format_text_feedback(analysis)
+    
+    if feedback_text:
+        await m.reply(feedback_text)
+    
+    # Step 2: Build context for GPT response (without grammar correction - already done)
     persona = PERSONA_PROMPTS.get(topic_key, PERSONA_PROMPTS.get("free"))
     
     # Get recent messages from DB for context
@@ -3546,7 +3884,7 @@ async def handle_roleplay_message(m: types.Message, session: dict):
         )
         rows = cur.fetchall()
     
-    messages = [{"role": "system", "content": persona + "\n\nKeep your responses concise (2-3 sentences). Correct any grammar mistakes the user makes, using this format: 🔴 original → ✅ corrected — краткое объяснение на русском языке (1 предложение)."}]
+    messages = [{"role": "system", "content": persona + "\n\nKeep your responses concise (2-3 sentences). The user's message was already analyzed for grammar, so just respond naturally to continue the conversation."}]
     
     # Add conversation history (reversed to chronological order)
     for row in reversed(rows):
@@ -3625,19 +3963,26 @@ async def handle_news_discussion(m: types.Message, session: dict):
     user = get_user(user_id)
     level = user.get("level", "B1") if user else "B1"
     
-    # Build context for GPT
+    # Step 1: Analyze user's text and send feedback first
+    analysis = await analyze_voice_text(text, level)
+    feedback_text = format_text_feedback(analysis)
+    
+    if feedback_text:
+        await m.reply(feedback_text)
+    
+    # Step 2: Build context for GPT response (without grammar correction - already done)
     system_prompt = f"""You are an English tutor discussing a news article with a student.
 Article title: {title}
 Article summary: {summary}
 Current question being discussed: {current_question}
 
 Your task:
-1. First, correct any grammar or vocabulary mistakes in the student's response (use format: 🔴 original → ✅ corrected — краткое объяснение на русском языке)
-2. Then respond naturally to their answer, asking a follow-up question to keep the conversation going.
-3. Keep responses concise (2-3 sentences after corrections).
-4. Adapt your language to {level} level.
+1. Respond naturally to their answer about the article
+2. Ask a follow-up question to keep the conversation going
+3. Keep responses concise (2-3 sentences)
+4. Adapt your language to {level} level
 
-IMPORTANT: Do NOT correct punctuation, capitalization, or contractions. Only correct actual grammar and vocabulary errors."""
+Note: The student's message was already analyzed for grammar, so just continue the discussion naturally."""
 
     # Get recent messages for context
     with closing(db()) as conn:
