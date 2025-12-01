@@ -44,6 +44,7 @@ def log_event(user_id, event_type, metadata=None, session_id=None):
 from datetime import date
 # penpal_english_bot.py
 import os
+import sys
 import json
 import logging
 import psycopg2
@@ -98,7 +99,15 @@ if not GNEWS_API_KEY:
 
 bot = Bot(BOT_TOKEN, parse_mode="HTML")
 dp = Dispatcher(bot)
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    stream=sys.stdout,
+    force=True
+)
+# Ensure stdout is unbuffered
+import functools
+print = functools.partial(print, flush=True)
 
 from contextlib import closing
 from db import db
@@ -1787,6 +1796,10 @@ async def news_next(c: types.CallbackQuery):
 @dp.callback_query_handler(lambda c: c.data == "menu:main")
 async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
+    
+    # Check and show streak notification on first daily activity
+    await check_and_show_streak_notification(c.from_user.id, bot, c.from_user.id)
+    
     try:
         await c.message.edit_text(
             "Меню активности — выбери, что хочешь сделать:",
@@ -1999,6 +2012,10 @@ async def cmd_menu(m: types.Message):
     log_event(m.from_user.id, "command_used", {"command": "/menu"})
     # From the main menu there should be no active chat topic session
     USER_CHAT_SESSIONS.pop(m.from_user.id, None)
+    
+    # Check and show streak notification on first daily activity
+    await check_and_show_streak_notification(m.from_user.id, bot, m.from_user.id)
+    
     await m.answer(
         "Меню активности — выбери, что хочешь сделать:",
         reply_markup=mode_keyboard()
@@ -2964,6 +2981,90 @@ def init_game_tables():
 
 # Helper functions for Profile, Streak, and Dictionary features
 
+async def check_and_show_streak_notification(user_id, bot_instance, chat_id=None):
+    """
+    Checks streak_notified_today field. If False, shows streak notification and sets to True.
+    Also resets streak_notified_today to False if it's a new day.
+    Returns (shown: bool, streak: int).
+    """
+    today = date.today()
+    if chat_id is None:
+        chat_id = user_id
+        
+    with closing(db()) as conn:
+        c = conn.cursor()
+        c.execute("""
+            SELECT streak_count, last_active_date, max_streak, streak_notified_today 
+            FROM users WHERE id=%s
+        """, (user_id,))
+        row = c.fetchone()
+        
+        if not row:
+            logging.warning(f"[streak_notification] User {user_id} not found")
+            return False, 0
+            
+        streak_count = row[0] or 0
+        last_active = row[1]  # date object or None
+        max_streak = row[2] or 0
+        notified_today = row[3] or False
+        
+        # If last_active is not today, reset notified flag and update streak
+        if last_active != today:
+            # Calculate new streak
+            if last_active is None:
+                new_streak = 1
+            elif last_active == today - timedelta(days=1):
+                new_streak = streak_count + 1
+            else:
+                new_streak = 1  # Streak broken
+                
+            new_max = max(max_streak, new_streak)
+            
+            # Update DB: set new streak, new date, reset notified flag
+            c.execute("""
+                UPDATE users 
+                SET streak_count=%s, last_active_date=%s, max_streak=%s, streak_notified_today=FALSE 
+                WHERE id=%s
+            """, (new_streak, today, new_max, user_id))
+            conn.commit()
+            
+            streak_count = new_streak
+            max_streak = new_max
+            notified_today = False
+            
+            logging.info(f"[streak_notification] Updated streak for user={user_id}: streak={new_streak}, max={new_max}")
+        
+        # If already notified today, skip
+        if notified_today:
+            logging.info(f"[streak_notification] Already notified user={user_id} today, skipping")
+            return False, streak_count
+        
+        # Mark as notified
+        c.execute("UPDATE users SET streak_notified_today=TRUE WHERE id=%s", (user_id,))
+        conn.commit()
+    
+    # Prepare notification message
+    if streak_count == 1 and (row[0] or 0) > 1:
+        # Streak was broken (old streak > 1, new = 1)
+        msg = f"😢 Серия прервалась! Начинаем заново.\n🔥 Победная серия: <b>1 день</b>"
+    elif streak_count == 1:
+        # First day or restart
+        msg = f"🎉 Отличное начало!\n🔥 Победная серия: <b>1 день</b>"
+    else:
+        # Streak continues
+        emoji = "🔥" if streak_count < 7 else "🔥🔥" if streak_count < 30 else "🔥🔥🔥"
+        msg = f"{emoji} Победная серия продлена!\n<b>{streak_count} дней подряд!</b>"
+        if streak_count == max_streak and streak_count > 1:
+            msg += "\n🏆 Это твой новый рекорд!"
+    
+    try:
+        await bot_instance.send_message(chat_id, msg, parse_mode="HTML")
+        logging.info(f"[streak_notification] Sent to user={user_id} streak={streak_count} max={max_streak}")
+        return True, streak_count
+    except Exception as e:
+        logging.error(f"[streak_notification] Failed to send for user={user_id}: {e}")
+        return False, streak_count
+
 def update_streak(user_id):
     """
     Updates user streak based on last_active_date.
@@ -3364,6 +3465,10 @@ async def handle_text_message(m: types.Message):
             elif session_type == "roleplay":
                 log_event(user_id, "chat_closed", {"topic": session.get("topic")})
             USER_CHAT_SESSIONS.pop(user_id, None)
+            
+            # Show streak notification when returning to menu
+            await check_and_show_streak_notification(user_id, bot, user_id)
+            
             await m.answer(
                 "Хорошая работа! Возвращаю тебя в меню 🏠",
                 reply_markup=mode_keyboard()
@@ -3420,6 +3525,10 @@ async def handle_roleplay_message(m: types.Message, session: dict):
     if text.lower() in ["bye", "goodbye", "пока", "выход"]:
         completed = session.get("completed_count", 0)
         USER_CHAT_SESSIONS.pop(user_id, None)
+        
+        # Show streak notification when returning to menu
+        await check_and_show_streak_notification(user_id, bot, user_id)
+        
         await m.answer(
             f"Диалог завершён! 👋\n\nВыполнено заданий: {completed}\n\nВозвращайся, когда захочешь попрактиковаться ещё!",
             reply_markup=mode_keyboard()
@@ -3775,6 +3884,9 @@ if __name__ == '__main__':
         asyncio.run(start_all())
     else:
         # Local development: polling only
+        print("=" * 50)
+        print("🚀 Starting bot in POLLING mode (local development)")
+        print("=" * 50)
         logging.info("Starting bot in POLLING mode (local development)")
         executor.start_polling(dp, skip_updates=True)
 
