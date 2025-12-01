@@ -556,17 +556,24 @@ def get_user_truth_lie_count_today(user_id):
 
 
 def get_user_chat_messages_count_today(user_id):
-    """Get count of user messages in chat mode today (for paywall)."""
+    """Get count of user messages in chat mode today (for paywall).
+    
+    Excludes:
+    - Commands starting with /
+    - Callback data (format like 'word:value' without spaces, max ~30 chars)
+    """
     today = date.today()
     with closing(db()) as conn:
         c = conn.cursor()
-        # Count only user messages (role='user') sent today in chat mode
-        # We consider messages as "chat" if they're not commands
+        # Count only real user messages, not commands or callback data
+        # Callback data is short (< 50 chars), contains ':' and no spaces
         c.execute("""
             SELECT COUNT(*) FROM messages 
             WHERE user_id = %s 
               AND role = 'user' 
               AND created_at::date = %s
+              AND content NOT LIKE '/%'
+              AND NOT (LENGTH(content) < 50 AND content LIKE '%:%' AND content NOT LIKE '% %')
         """, (user_id, today))
         row = c.fetchone()
     return row[0] if row else 0
