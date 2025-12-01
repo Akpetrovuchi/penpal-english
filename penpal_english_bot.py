@@ -856,9 +856,13 @@ def save_msg(user_id, role, content):
                                 ELSE 1
                             END
                         ),
-                        last_active_date = %s
+                        last_active_date = %s,
+                        streak_notified_today = CASE 
+                            WHEN last_active_date != %s THEN FALSE 
+                            ELSE streak_notified_today 
+                        END
                     WHERE id = %s
-                """, (now, today, today, today, today, today, user_id))
+                """, (now, today, today, today, today, today, today, user_id))
             except Exception:
                 logging.exception("Failed to update last_interaction and streak")
         else:
@@ -2983,18 +2987,18 @@ def init_game_tables():
 
 async def check_and_show_streak_notification(user_id, bot_instance, chat_id=None):
     """
-    Checks streak_notified_today field. If False, shows streak notification and sets to True.
-    Also resets streak_notified_today to False if it's a new day.
+    Shows streak notification if streak_notified_today is False.
+    Only checks streak_notified_today field - doesn't depend on last_active_date.
+    streak values are already updated by save_msg(), we just show notification here.
     Returns (shown: bool, streak: int).
     """
-    today = date.today()
     if chat_id is None:
         chat_id = user_id
         
     with closing(db()) as conn:
         c = conn.cursor()
         c.execute("""
-            SELECT streak_count, last_active_date, max_streak, streak_notified_today 
+            SELECT streak_count, max_streak, streak_notified_today 
             FROM users WHERE id=%s
         """, (user_id,))
         row = c.fetchone()
@@ -3004,51 +3008,24 @@ async def check_and_show_streak_notification(user_id, bot_instance, chat_id=None
             return False, 0
             
         streak_count = row[0] or 0
-        last_active = row[1]  # date object or None
-        max_streak = row[2] or 0
-        notified_today = row[3] or False
-        
-        # If last_active is not today, reset notified flag and update streak
-        if last_active != today:
-            # Calculate new streak
-            if last_active is None:
-                new_streak = 1
-            elif last_active == today - timedelta(days=1):
-                new_streak = streak_count + 1
-            else:
-                new_streak = 1  # Streak broken
-                
-            new_max = max(max_streak, new_streak)
-            
-            # Update DB: set new streak, new date, reset notified flag
-            c.execute("""
-                UPDATE users 
-                SET streak_count=%s, last_active_date=%s, max_streak=%s, streak_notified_today=FALSE 
-                WHERE id=%s
-            """, (new_streak, today, new_max, user_id))
-            conn.commit()
-            
-            streak_count = new_streak
-            max_streak = new_max
-            notified_today = False
-            
-            logging.info(f"[streak_notification] Updated streak for user={user_id}: streak={new_streak}, max={new_max}")
+        max_streak = row[1] or 0
+        notified_today = row[2] or False
         
         # If already notified today, skip
         if notified_today:
             logging.info(f"[streak_notification] Already notified user={user_id} today, skipping")
             return False, streak_count
         
-        # Mark as notified
+        # Mark as notified BEFORE sending (to avoid race conditions)
         c.execute("UPDATE users SET streak_notified_today=TRUE WHERE id=%s", (user_id,))
         conn.commit()
     
-    # Prepare notification message
-    if streak_count == 1 and (row[0] or 0) > 1:
-        # Streak was broken (old streak > 1, new = 1)
-        msg = f"😢 Серия прервалась! Начинаем заново.\n🔥 Победная серия: <b>1 день</b>"
+    # Prepare notification message based on current streak
+    if streak_count == 0:
+        # No streak yet
+        return False, 0
     elif streak_count == 1:
-        # First day or restart
+        # First day
         msg = f"🎉 Отличное начало!\n🔥 Победная серия: <b>1 день</b>"
     else:
         # Streak continues
