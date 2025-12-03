@@ -79,6 +79,26 @@ from services.voice_processing import (
     cleanup_voice_file
 )
 
+# Grammar learning module
+from services.grammar_learning import (
+    init_grammar_module,
+    get_topics_by_level,
+    get_topic_by_id,
+    save_theory,
+    get_next_exercise,
+    get_random_exercise,
+    save_user_progress,
+    generate_grammar_theory,
+    ensure_exercises_for_topic,
+    mark_topic_started,
+    mark_theory_read,
+    mark_topic_completed,
+    is_topic_completed,
+    get_completed_topics,
+    get_new_topics_started_today,
+    has_user_started_topic,
+)
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -1057,6 +1077,7 @@ def mode_keyboard():
         inline_keyboard=[
             [InlineKeyboardButton("Обсудить новость 📰", callback_data="mode:news")],
             [InlineKeyboardButton("Разговорная практика 💬", callback_data="mode:chat")],
+            [InlineKeyboardButton("Учить грамматику 📚", callback_data="grammar:start")],
             [InlineKeyboardButton("Тренировать слова 🧠", callback_data="mode:train_words")],
             [InlineKeyboardButton("Играть 🎮", callback_data="mode:games")],
             [InlineKeyboardButton("👤 Профиль", callback_data="mode:profile")],
@@ -3440,6 +3461,477 @@ async def handle_training_answer(c: types.CallbackQuery):
     await send_training_question(c.message, user_id)
 
 
+# ============== GRAMMAR LEARNING MODULE ==============
+
+# Session structure for grammar:
+# USER_CHAT_SESSIONS[user_id] = {
+#     "type": "grammar",
+#     "level": "B1",
+#     "topic_id": 5,
+#     "topic_title": "Present Perfect",
+#     "current_exercise_id": 123,
+#     "exercises_done": 0,
+#     "correct_count": 0
+# }
+
+GRAMMAR_EXERCISES_PER_SESSION = 7
+
+
+def grammar_level_keyboard():
+    """Keyboard with level selection for grammar."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("A2 - Elementary", callback_data="grammar:level:A2")],
+        [InlineKeyboardButton("B1 - Intermediate", callback_data="grammar:level:B1")],
+        [InlineKeyboardButton("B2 - Upper-Intermediate", callback_data="grammar:level:B2")],
+        [InlineKeyboardButton("C1 - Advanced", callback_data="grammar:level:C1")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+    ])
+
+
+def grammar_topics_keyboard(topics: list, level: str, user_id: int):
+    """Keyboard with topic selection for a level (with checkmarks for completed)."""
+    completed = get_completed_topics(user_id)
+    buttons = []
+    for topic in topics:
+        # Add checkmark if topic is completed
+        checkmark = " ✅" if topic["id"] in completed else ""
+        buttons.append([InlineKeyboardButton(
+            f"{topic['title']}{checkmark}", 
+            callback_data=f"grammar:topic:{topic['id']}"
+        )])
+    buttons.append([InlineKeyboardButton("← Назад к уровням", callback_data="grammar:start")])
+    buttons.append([InlineKeyboardButton("Меню 🏠", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def grammar_exercise_keyboard(exercise_id: int):
+    """Keyboard for answering exercise (3 options)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton("1", callback_data=f"grammar:answer:{exercise_id}:0"),
+            InlineKeyboardButton("2", callback_data=f"grammar:answer:{exercise_id}:1"),
+            InlineKeyboardButton("3", callback_data=f"grammar:answer:{exercise_id}:2"),
+        ],
+        [InlineKeyboardButton("Выйти ❌", callback_data="grammar:exit")],
+    ])
+
+
+@dp.message_handler(commands=["grammar"])
+async def cmd_grammar(m: types.Message):
+    """Start grammar learning mode."""
+    user_id = m.from_user.id
+    log_event(user_id, "grammar_start", {})
+    
+    # Clear any existing session
+    USER_CHAT_SESSIONS.pop(user_id, None)
+    
+    await m.answer(
+        "📚 <b>Учить грамматику</b>\n\n"
+        "Изучай теорию и закрепляй на практике!\n"
+        "🆓 1 новая тема в день бесплатно\n"
+        "✅ Пройденные темы — без ограничений\n\n"
+        "Выбери уровень сложности:",
+        reply_markup=grammar_level_keyboard()
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data == "grammar:start")
+async def grammar_start_callback(c: types.CallbackQuery):
+    """Show grammar level selection."""
+    user_id = c.from_user.id
+    log_event(user_id, "grammar_start", {})
+    
+    # Clear any existing session
+    USER_CHAT_SESSIONS.pop(user_id, None)
+    
+    await c.answer()
+    await c.message.edit_text(
+        "📚 <b>Учить грамматику</b>\n\n"
+        "Изучай теорию и закрепляй на практике!\n"
+        "🆓 1 новая тема в день бесплатно\n"
+        "✅ Пройденные темы — без ограничений\n\n"
+        "Выбери уровень сложности:",
+        reply_markup=grammar_level_keyboard()
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grammar:level:"))
+async def grammar_level_selected(c: types.CallbackQuery):
+    """Handle level selection, show topics."""
+    user_id = c.from_user.id
+    level = c.data.split(":")[2]
+    
+    log_event(user_id, "grammar_level_selected", {"level": level})
+    
+    topics = get_topics_by_level(level)
+    
+    if not topics:
+        await c.answer("Темы для этого уровня пока не добавлены", show_alert=True)
+        return
+    
+    await c.answer()
+    await c.message.edit_text(
+        f"📚 <b>Уровень {level}</b>\n\n"
+        f"Выбери тему для изучения:\n"
+        f"✅ — тема пройдена",
+        reply_markup=grammar_topics_keyboard(topics, level, user_id)
+    )
+
+
+# Paywall limit for grammar: 1 new topic per day for free users
+FREE_GRAMMAR_TOPICS_PER_DAY = 1
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grammar:topic:"))
+async def grammar_topic_selected(c: types.CallbackQuery):
+    """Handle topic selection, show theory."""
+    user_id = c.from_user.id
+    topic_id = int(c.data.split(":")[2])
+    
+    topic = get_topic_by_id(topic_id)
+    if not topic:
+        await c.answer("Тема не найдена", show_alert=True)
+        return
+    
+    # Check paywall for NEW topics (already started topics are free to repeat)
+    paid = is_paid_user(user_id)
+    already_started = has_user_started_topic(user_id, topic_id)
+    
+    if not paid and not already_started:
+        # Check how many NEW topics started today
+        new_topics_today = get_new_topics_started_today(user_id)
+        logging.info(f"[grammar] user={user_id} paid={paid} new_topics_today={new_topics_today} limit={FREE_GRAMMAR_TOPICS_PER_DAY}")
+        
+        if new_topics_today >= FREE_GRAMMAR_TOPICS_PER_DAY:
+            # Show paywall
+            increment_user_counter(user_id, "paywall_shown")
+            log_event(user_id, "paywall_shown", {"reason": "grammar_topic_limit", "count": new_topics_today})
+            logging.info(f"[grammar] PAYWALL TRIGGERED for user={user_id}")
+            
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Приобрести доступ 💎", callback_data="profile_buy_unlimited")],
+                [InlineKeyboardButton("← К темам", callback_data=f"grammar:level:{topic['level']}")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+            await c.answer()
+            await c.message.edit_text(
+                "🔒 <b>Лимит достигнут</b>\n\n"
+                "Ты уже изучил 1 новую тему сегодня.\n"
+                "Пройденные темы можно повторять без ограничений ✅\n\n"
+                "Чтобы изучать больше новых тем — приобрети безлимитный доступ 💎",
+                reply_markup=kb
+            )
+            return
+    
+    log_event(user_id, "grammar_topic_selected", {"topic_id": topic_id, "topic": topic["title"]})
+    
+    # Mark topic as started (for paywall tracking)
+    mark_topic_started(user_id, topic_id)
+    
+    await c.answer()
+    
+    # Show loading message
+    await c.message.edit_text(f"📚 <b>{topic['title']}</b>\n\n⏳ Загружаю материал...")
+    
+    # Generate theory if not exists
+    if not topic.get("theory"):
+        theory = await generate_grammar_theory(topic["title"], topic["level"])
+        save_theory(topic_id, theory)
+        topic["theory"] = theory
+    
+    # Mark theory as read
+    mark_theory_read(user_id, topic_id)
+    
+    # Store session
+    USER_CHAT_SESSIONS[user_id] = {
+        "type": "grammar",
+        "level": topic["level"],
+        "topic_id": topic_id,
+        "topic_title": topic["title"],
+        "current_exercise_id": None,
+        "exercises_done": 0,
+        "correct_count": 0
+    }
+    
+    # Show theory with button to start exercises
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("Перейти к упражнениям ▶️", callback_data=f"grammar:exercises:{topic_id}")],
+        [InlineKeyboardButton("← Назад к темам", callback_data=f"grammar:level:{topic['level']}")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+    ])
+    
+    await c.message.edit_text(
+        topic["theory"],
+        reply_markup=kb
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grammar:exercises:"))
+async def grammar_start_exercises(c: types.CallbackQuery):
+    """Start exercises for a topic."""
+    user_id = c.from_user.id
+    topic_id = int(c.data.split(":")[2])
+    
+    topic = get_topic_by_id(topic_id)
+    if not topic:
+        await c.answer("Тема не найдена", show_alert=True)
+        return
+    
+    await c.answer()
+    await c.message.edit_text(f"📝 <b>{topic['title']}</b>\n\n⏳ Подготавливаю упражнения...")
+    
+    # Ensure we have enough exercises (generate if needed)
+    await ensure_exercises_for_topic(topic_id, topic["title"], topic["level"], needed=50)
+    
+    # Initialize or reset session
+    USER_CHAT_SESSIONS[user_id] = {
+        "type": "grammar",
+        "level": topic["level"],
+        "topic_id": topic_id,
+        "topic_title": topic["title"],
+        "current_exercise_id": None,
+        "exercises_done": 0,
+        "correct_count": 0
+    }
+    
+    # Send first exercise
+    await send_grammar_exercise(c.message, user_id)
+
+
+async def send_grammar_exercise(message, user_id: int):
+    """Send next grammar exercise to user."""
+    session = USER_CHAT_SESSIONS.get(user_id)
+    if not session or session.get("type") != "grammar":
+        return
+    
+    topic_id = session["topic_id"]
+    exercises_done = session["exercises_done"]
+    
+    # Check if session complete
+    if exercises_done >= GRAMMAR_EXERCISES_PER_SESSION:
+        await show_grammar_results(message, user_id)
+        return
+    
+    # Get next exercise
+    exercise = get_random_exercise(topic_id, user_id)
+    
+    if not exercise:
+        # No exercises available, try generating more
+        topic = get_topic_by_id(topic_id)
+        await ensure_exercises_for_topic(topic_id, topic["title"], topic["level"], needed=50)
+        exercise = get_random_exercise(topic_id, user_id)
+    
+    if not exercise:
+        await message.edit_text(
+            "😕 Не удалось загрузить упражнения. Попробуйте позже.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+        )
+        USER_CHAT_SESSIONS.pop(user_id, None)
+        return
+    
+    # Store current exercise
+    session["current_exercise_id"] = exercise["id"]
+    
+    # Format question with options
+    options_text = "\n".join([f"{i+1}. {opt}" for i, opt in enumerate(exercise["options"])])
+    
+    text = (
+        f"📝 <b>{session['topic_title']}</b>\n"
+        f"Упражнение {exercises_done + 1}/{GRAMMAR_EXERCISES_PER_SESSION}\n\n"
+        f"<b>{exercise['question']}</b>\n\n"
+        f"{options_text}"
+    )
+    
+    try:
+        await message.edit_text(text, reply_markup=grammar_exercise_keyboard(exercise["id"]))
+    except Exception:
+        # If can't edit, send new message
+        await bot.send_message(user_id, text, reply_markup=grammar_exercise_keyboard(exercise["id"]))
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("grammar:answer:"))
+async def grammar_answer_handler(c: types.CallbackQuery):
+    """Handle user's answer to exercise."""
+    user_id = c.from_user.id
+    parts = c.data.split(":")
+    exercise_id = int(parts[2])
+    selected_index = int(parts[3])
+    
+    session = USER_CHAT_SESSIONS.get(user_id)
+    if not session or session.get("type") != "grammar":
+        await c.answer("Сессия истекла. Начните заново.", show_alert=True)
+        return
+    
+    # Verify exercise matches
+    if session.get("current_exercise_id") != exercise_id:
+        await c.answer("Это упражнение устарело.", show_alert=True)
+        return
+    
+    # Get exercise details
+    from services.grammar_learning import get_random_exercise
+    from contextlib import closing
+    from db import db
+    
+    with closing(db()) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT question, options, correct_index, explanation
+            FROM grammar_exercises WHERE id = %s
+        """, (exercise_id,))
+        row = cursor.fetchone()
+    
+    if not row:
+        await c.answer("Упражнение не найдено", show_alert=True)
+        return
+    
+    question, options, correct_index, explanation = row
+    is_correct = (selected_index == correct_index)
+    
+    # Save progress
+    save_user_progress(user_id, exercise_id, is_correct)
+    
+    # Update session
+    session["exercises_done"] += 1
+    if is_correct:
+        session["correct_count"] += 1
+    
+    # Log event
+    log_event(user_id, "grammar_exercise_answered", {
+        "exercise_id": exercise_id,
+        "is_correct": is_correct,
+        "exercises_done": session["exercises_done"]
+    })
+    
+    await c.answer()
+    
+    # Show feedback
+    if is_correct:
+        feedback = f"✅ <b>Правильно!</b>\n\n"
+    else:
+        correct_option = options[correct_index]
+        feedback = (
+            f"❌ <b>Неверно</b>\n\n"
+            f"Правильный ответ: <b>{correct_option}</b>\n\n"
+            f"💡 {explanation}\n\n"
+        )
+    
+    # Check if more exercises or show results
+    if session["exercises_done"] >= GRAMMAR_EXERCISES_PER_SESSION:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Посмотреть результат 📊", callback_data="grammar:results")]
+        ])
+    else:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("Следующее задание ▶️", callback_data="grammar:next")]
+        ])
+    
+    await c.message.edit_text(feedback, reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data == "grammar:next")
+async def grammar_next_exercise(c: types.CallbackQuery):
+    """Send next exercise."""
+    await c.answer()
+    await send_grammar_exercise(c.message, c.from_user.id)
+
+
+@dp.callback_query_handler(lambda c: c.data == "grammar:results")
+async def grammar_show_results(c: types.CallbackQuery):
+    """Show session results."""
+    await c.answer()
+    await show_grammar_results(c.message, c.from_user.id)
+
+
+async def show_grammar_results(message, user_id: int):
+    """Display final results of grammar session."""
+    session = USER_CHAT_SESSIONS.get(user_id)
+    
+    if not session or session.get("type") != "grammar":
+        return
+    
+    correct = session.get("correct_count", 0)
+    total = session.get("exercises_done", GRAMMAR_EXERCISES_PER_SESSION)
+    topic_title = session.get("topic_title", "Грамматика")
+    level = session.get("level", "")
+    topic_id = session.get("topic_id")
+    
+    # Calculate percentage and emoji
+    percentage = int((correct / total) * 100) if total > 0 else 0
+    if percentage >= 90:
+        emoji = "🏆"
+        comment = "Отличный результат!"
+    elif percentage >= 70:
+        emoji = "👍"
+        comment = "Хороший результат!"
+    elif percentage >= 50:
+        emoji = "💪"
+        comment = "Неплохо, но можно лучше!"
+    else:
+        emoji = "📚"
+        comment = "Стоит повторить теорию"
+    
+    # Mark topic as completed (theory read + exercises done)
+    if topic_id and total >= GRAMMAR_EXERCISES_PER_SESSION:
+        mark_topic_completed(user_id, topic_id)
+    
+    log_event(user_id, "grammar_completed", {
+        "topic_id": topic_id,
+        "topic": topic_title,
+        "correct": correct,
+        "total": total,
+        "percentage": percentage
+    })
+    
+    # Show completion badge if first time
+    completion_text = ""
+    if topic_id and total >= GRAMMAR_EXERCISES_PER_SESSION:
+        completion_text = "\n\n✅ Тема отмечена как пройденная!"
+    
+    text = (
+        f"{emoji} <b>Результат</b>\n\n"
+        f"Тема: {topic_title}\n"
+        f"Правильных: <b>{correct}</b> из <b>{total}</b> ({percentage}%)\n\n"
+        f"{comment}{completion_text}"
+    )
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("🔄 Повторить тему", callback_data=f"grammar:exercises:{topic_id}")],
+        [InlineKeyboardButton("📚 Выбрать тему", callback_data=f"grammar:level:{level}")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+    ])
+    
+    # Clear session
+    USER_CHAT_SESSIONS.pop(user_id, None)
+    
+    try:
+        await message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await bot.send_message(user_id, text, reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data == "grammar:exit")
+async def grammar_exit(c: types.CallbackQuery):
+    """Exit grammar mode."""
+    user_id = c.from_user.id
+    session = USER_CHAT_SESSIONS.get(user_id)
+    
+    if session and session.get("type") == "grammar":
+        # Show partial results if any exercises done
+        if session.get("exercises_done", 0) > 0:
+            await c.answer()
+            await show_grammar_results(c.message, user_id)
+            return
+    
+    USER_CHAT_SESSIONS.pop(user_id, None)
+    await c.answer()
+    await c.message.edit_text(
+        "Меню активности — выбери, что хочешь сделать:",
+        reply_markup=mode_keyboard()
+    )
+
+
 # --- Voice message handler ---
 @dp.message_handler(content_types=types.ContentTypes.VOICE)
 async def handle_voice_message(m: types.Message):
@@ -4191,6 +4683,8 @@ if __name__ == '__main__':
     init_db()
     # Ensure game tables exist
     init_game_tables()
+    # Initialize grammar module (tables + seed topics)
+    init_grammar_module()
     
     # Check if we should run with webhook
     use_webhook = os.getenv("USE_WEBHOOK", "false").lower() == "true"
