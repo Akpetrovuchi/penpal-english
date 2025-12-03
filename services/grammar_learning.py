@@ -603,8 +603,21 @@ async def generate_grammar_exercise(topic_title: str, level: str, existing_quest
         correct_answer = exercise["options"][exercise["correct_index"]]
         if len(correct_answer.strip()) < 1:
             raise ValueError("Empty correct answer")
-            
-        logging.info(f"[grammar] Generated {exercise_type} exercise for {topic_title}")
+        
+        # RANDOMIZE answer positions
+        options = exercise["options"]
+        correct_idx = exercise["correct_index"]
+        correct_text = options[correct_idx]
+        
+        # Shuffle options
+        random.shuffle(options)
+        
+        # Find new index of correct answer
+        new_correct_idx = options.index(correct_text)
+        exercise["options"] = options
+        exercise["correct_index"] = new_correct_idx
+        
+        logging.info(f"[grammar] Generated {exercise_type} exercise for {topic_title}, correct_idx={new_correct_idx}")
         return exercise
     except json.JSONDecodeError as e:
         logging.error(f"[grammar] JSON parse error: {e}, content: {content[:200]}")
