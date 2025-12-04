@@ -1866,6 +1866,9 @@ async def news_next(c: types.CallbackQuery):
 async def menu_main_callback(c: types.CallbackQuery):
     await c.answer()
     
+    # Update streak first (resets streak_notified_today if new day)
+    update_streak(c.from_user.id)
+    
     # Check and show streak notification on first daily activity
     await check_and_show_streak_notification(c.from_user.id, bot, c.from_user.id)
     
@@ -3112,6 +3115,7 @@ def update_streak(user_id):
     Updates user streak based on last_active_date.
     Called from callback handlers that don't use save_msg.
     Skips DB write if already updated today.
+    Also resets streak_notified_today if this is first activity of the day.
     """
     today = date.today()
     with closing(db()) as conn:
@@ -3142,10 +3146,10 @@ def update_streak(user_id):
         else:
             new_streak = 1 # Streak broken
             
-        # Update DB
+        # Update DB with streak_notified_today reset
         c.execute("""
             UPDATE users 
-            SET streak_count=%s, last_active_date=%s, max_streak=%s 
+            SET streak_count=%s, last_active_date=%s, max_streak=%s, streak_notified_today=FALSE 
             WHERE id=%s
         """, (new_streak, today, new_max, user_id))
         conn.commit()
