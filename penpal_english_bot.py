@@ -99,6 +99,20 @@ from services.grammar_learning import (
     has_user_started_topic,
 )
 
+# Word training module
+from services.word_training import (
+    init_word_training_tables,
+    WORD_TRAINING_TOPICS,
+    get_user_dictionary_word_count,
+    get_completed_word_topics,
+    is_word_topic_completed,
+    mark_word_topic_completed,
+    get_topic_words_for_user,
+    save_words_to_dictionary,
+    generate_topic_words,
+    get_user_level,
+)
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -3288,42 +3302,117 @@ async def show_profile(user_id, messageable):
 
 # --- Word Training Logic ---
 
+def word_training_choice_keyboard():
+    """Keyboard for choosing between existing and new words training."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("📚 Учить добавленные слова", callback_data="train:existing")],
+        [InlineKeyboardButton("✨ Учить новые слова", callback_data="train:new")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")],
+    ])
+
+
+def word_topics_keyboard(user_id: int):
+    """Keyboard with topic selection for new words training."""
+    completed = get_completed_word_topics(user_id)
+    buttons = []
+    for code, name in WORD_TRAINING_TOPICS.items():
+        label = f"✅ {name}" if code in completed else name
+        buttons.append([InlineKeyboardButton(label, callback_data=f"train:topic:{code}")])
+    buttons.append([InlineKeyboardButton("← Назад", callback_data="mode:train_words")])
+    buttons.append([InlineKeyboardButton("Меню 🏠", callback_data="menu:main")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
 @dp.callback_query_handler(lambda c: c.data == "mode:train_words")
-async def start_word_training(c: types.CallbackQuery):
+async def start_word_training_choice(c: types.CallbackQuery):
+    """Entry point - show choice between existing and new words."""
+    user_id = c.from_user.id
+    log_event(user_id, "word_training_menu_opened", {})
+    
+    await c.answer()
+    await c.message.edit_text(
+        "🧠 <b>Тренировка слов</b>\n\n"
+        "Что будем тренировать?",
+        reply_markup=word_training_choice_keyboard()
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data == "train:existing")
+async def train_existing_words(c: types.CallbackQuery):
+    """Train words from user's dictionary."""
     user_id = c.from_user.id
     
-    # Fetch words
-    with closing(db()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT word, translation FROM user_dictionary WHERE user_id=%s AND translation IS NOT NULL AND translation != ''", (user_id,))
-        rows = cur.fetchall()
-        
-    if len(rows) < 3:
-        log_event(user_id, "word_training_insufficient_words", {"word_count": len(rows)})
+    word_count = get_user_dictionary_word_count(user_id)
+    
+    if word_count < 3:
+        log_event(user_id, "word_training_insufficient_words", {"word_count": word_count})
         await c.answer()
         text = (
-            "Для тренировки нужно минимум 3 слова в словаре 📚\n\n"
+            "📚 <b>Недостаточно слов</b>\n\n"
+            "Для тренировки нужно минимум 3 слова в словаре.\n"
+            f"Сейчас у тебя: <b>{word_count}</b>\n\n"
             "Добавь слова:\n"
             "1. Напиши <code>apple словарь</code>\n"
-            "2. Или используй команду <code>/word apple</code>"
+            "2. Или используй команду <code>/word apple</code>\n\n"
+            "💡 Или выбери <b>«Учить новые слова»</b> — я подготовлю для тебя слова по интересной теме!"
         )
-        kb = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("✨ Учить новые слова", callback_data="train:new")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
         await c.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
         return
     
-    # Log event only when training actually starts
-    log_event(user_id, "word_training_start", {"word_count": len(rows)})
-    # We need 6 questions.
-    # Q1-3: En -> Ru (Select translation)
-    # Q4-6: Ru -> En (Select word)
+    # Start existing words training
+    await _start_word_quiz(c, user_id)
+
+
+async def _start_word_quiz(c: types.CallbackQuery, user_id: int, topic_code: str = None, words_to_save: list = None):
+    """Start word quiz with optional topic filter.
+    
+    Args:
+        c: Callback query
+        user_id: User ID
+        topic_code: Optional topic code for filtering/tracking
+        words_to_save: Optional list of words to save to dictionary AFTER training completes
+    """
+    
+    # Check if we have words from session (new topic learning)
+    session_preview = USER_CHAT_SESSIONS.get(user_id)
+    if session_preview and session_preview.get("type") == "word_cards_preview":
+        # Use words from preview session
+        preview_words = session_preview.get("words", [])
+        topic_code = session_preview.get("topic_code")
+        words_to_save = preview_words
+        rows = [(w["word"], w["translation"]) for w in preview_words]
+    else:
+        # Fetch words from database
+        with closing(db()) as conn:
+            cur = conn.cursor()
+            if topic_code:
+                cur.execute("""
+                    SELECT word, translation FROM user_dictionary 
+                    WHERE user_id=%s AND topic_code=%s 
+                      AND translation IS NOT NULL AND translation != ''
+                """, (user_id, topic_code))
+            else:
+                cur.execute("""
+                    SELECT word, translation FROM user_dictionary 
+                    WHERE user_id=%s AND translation IS NOT NULL AND translation != ''
+                """, (user_id,))
+            rows = cur.fetchall()
+    
+    if len(rows) < 3:
+        log_event(user_id, "word_training_insufficient_words", {"word_count": len(rows), "topic": topic_code})
+        await c.answer("Недостаточно слов для тренировки", show_alert=True)
+        return
+    
+    log_event(user_id, "word_training_start", {"word_count": len(rows), "topic": topic_code})
     
     import random
     random.shuffle(rows)
     
-    # If we have fewer than 6 words, we reuse them.
-    # We need a pool of words for questions.
-    # Let's pick 6 question items (word, translation).
-    
+    # Build 6 questions
     question_items = []
     while len(question_items) < 6:
         question_items.extend(rows)
@@ -3333,27 +3422,22 @@ async def start_word_training(c: types.CallbackQuery):
     questions = []
     
     for i, (word, trans) in enumerate(question_items):
-        # First 3: En -> Ru
         if i < 3:
             q_type = "en_ru"
             question_text = word
             correct_answer = trans
-            # Distractors: other translations
             distractors = [r[1] for r in rows if r[1] != trans]
         else:
-            # Next 3: Ru -> En
             q_type = "ru_en"
             question_text = trans
             correct_answer = word
-            # Distractors: other words
             distractors = [r[0] for r in rows if r[0] != word]
-            
-        # Pick 2 random distractors (or fewer if not enough)
+        
         if len(distractors) > 2:
             opts = random.sample(distractors, 2)
         else:
             opts = distractors
-            
+        
         options = opts + [correct_answer]
         random.shuffle(options)
         
@@ -3363,26 +3447,148 @@ async def start_word_training(c: types.CallbackQuery):
             "correct": correct_answer,
             "options": options
         })
-        
+    
     USER_CHAT_SESSIONS[user_id] = {
         "type": "word_training",
         "questions": questions,
         "current_index": 0,
-        "score": 0
+        "score": 0,
+        "topic_code": topic_code,  # Track topic for completion
+        "words_to_save": words_to_save  # Words to save after training completes
     }
     
     await c.answer()
     await send_training_question(c.message, user_id)
 
 
+@dp.callback_query_handler(lambda c: c.data == "train:new")
+async def train_new_words(c: types.CallbackQuery):
+    """Show topic selection for new words."""
+    user_id = c.from_user.id
+    log_event(user_id, "word_training_new_opened", {})
+    
+    await c.answer()
+    await c.message.edit_text(
+        "✨ <b>Учить новые слова</b>\n\n"
+        "Выбери тему, по которой подготовлю для тебя новые слова 👇",
+        reply_markup=word_topics_keyboard(user_id)
+    )
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("train:topic:"))
+async def handle_topic_selection(c: types.CallbackQuery):
+    """Handle topic selection for new words training."""
+    user_id = c.from_user.id
+    topic_code = c.data.split(":")[2]
+    
+    if topic_code not in WORD_TRAINING_TOPICS:
+        await c.answer("Тема не найдена", show_alert=True)
+        return
+    
+    topic_name = WORD_TRAINING_TOPICS[topic_code]
+    
+    # Check if topic already completed
+    if is_word_topic_completed(user_id, topic_code):
+        log_event(user_id, "word_topic_repeat", {"topic": topic_code})
+        await c.answer()
+        
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton("🔄 Повторить эту тему", callback_data=f"train:repeat:{topic_code}")],
+            [InlineKeyboardButton("📚 Тренировать добавленные слова", callback_data="train:existing")],
+            [InlineKeyboardButton("← Выбрать другую тему", callback_data="train:new")],
+            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+        ])
+        
+        await c.message.edit_text(
+            f"✅ <b>Тема уже пройдена</b>\n\n"
+            f"Ты уже изучил слова по теме «{topic_name}».\n"
+            f"Слова добавлены в твой словарь.\n\n"
+            f"Ты можешь повторить тему или потренировать все свои слова.",
+            reply_markup=kb
+        )
+        return
+    
+    # Generate new words
+    log_event(user_id, "word_topic_selected", {"topic": topic_code})
+    await c.answer()
+    
+    # Show loading
+    await c.message.edit_text(f"⏳ Готовлю слова по теме «{topic_name}»...")
+    
+    # Get user level
+    level = get_user_level(user_id)
+    
+    # Generate words
+    words = await generate_topic_words(level, topic_code, limit=6)
+    
+    if not words:
+        await c.message.edit_text(
+            "😔 Не удалось сгенерировать слова. Попробуй ещё раз.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("🔄 Попробовать снова", callback_data=f"train:topic:{topic_code}")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+        )
+        return
+    
+    # Store words in user session - will be saved to dictionary AFTER training is complete
+    USER_CHAT_SESSIONS[user_id] = {
+        "type": "word_cards_preview",
+        "topic_code": topic_code,
+        "words": words
+    }
+    
+    # Format cards display
+    cards_text = f"📚 <b>Новые слова: {topic_name}</b>\n\n"
+    for i, w in enumerate(words, 1):
+        cards_text += f"<b>{i}. {w['word']}</b> — {w['translation']}\n"
+        if w.get('example'):
+            cards_text += f"   <i>{w['example']}</i>\n"
+        cards_text += "\n"
+    
+    cards_text += "Запомни эти слова — сейчас проверим! 💪"
+    
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton("▶️ Начать тренировку", callback_data=f"train:start:{topic_code}")],
+        [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+    ])
+    
+    await c.message.edit_text(cards_text, reply_markup=kb)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("train:start:"))
+async def start_topic_training(c: types.CallbackQuery):
+    """Start training for a specific topic after showing cards."""
+    user_id = c.from_user.id
+    topic_code = c.data.split(":")[2]
+    
+    log_event(user_id, "word_training_topic_start", {"topic": topic_code})
+    await _start_word_quiz(c, user_id, topic_code)
+
+
+@dp.callback_query_handler(lambda c: c.data.startswith("train:repeat:"))
+async def repeat_topic_training(c: types.CallbackQuery):
+    """Repeat training for an already completed topic."""
+    user_id = c.from_user.id
+    topic_code = c.data.split(":")[2]
+    
+    log_event(user_id, "word_training_topic_repeat", {"topic": topic_code})
+    await _start_word_quiz(c, user_id, topic_code)
+
+
 async def send_training_question(message: types.Message, user_id: int):
     session = USER_CHAT_SESSIONS.get(user_id)
     if not session or session.get("type") != "word_training":
-        await message.edit_text("Ошибка сессии. Попробуй заново.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]]))
+        await message.edit_text(
+            "Ошибка сессии. Попробуй заново.", 
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+        )
         return
-        
+    
     idx = session["current_index"]
     questions = session["questions"]
+    topic_code = session.get("topic_code")
+    words_to_save = session.get("words_to_save")
     
     if idx >= len(questions):
         # Finish
@@ -3394,44 +3600,55 @@ async def send_training_question(message: types.Message, user_id: int):
             praise = "Идеально! 🏆 Ты молодец!"
         elif score > total / 2:
             praise = "Хороший результат! 👍"
-            
-        text = (
-            f"{praise}\n\n"
-            f"Результат: <b>{score} из {total}</b>"
-        )
         
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton("Тренировать еще 🧠", callback_data="mode:train_words")],
-            [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
-        ])
+        # Save words to dictionary AFTER training is complete (if any)
+        if words_to_save and topic_code:
+            save_words_to_dictionary(user_id, words_to_save, topic_code)
+        
+        # Mark topic as completed if it was a topic training
+        if topic_code:
+            mark_word_topic_completed(user_id, topic_code)
+            topic_name = WORD_TRAINING_TOPICS.get(topic_code, "")
+            text = (
+                f"{praise}\n\n"
+                f"Тема: <b>{topic_name}</b>\n"
+                f"Результат: <b>{score} из {total}</b>\n\n"
+                f"Слова добавлены в твой словарь! 📚"
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("✨ Изучить другую тему", callback_data="train:new")],
+                [InlineKeyboardButton("📚 Тренировать все слова", callback_data="train:existing")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
+        else:
+            text = (
+                f"{praise}\n\n"
+                f"Результат: <b>{score} из {total}</b>"
+            )
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton("Тренировать еще 🧠", callback_data="train:existing")],
+                [InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]
+            ])
         
         await message.edit_text(text, reply_markup=kb)
-        log_event(user_id, "word_training_completed", {"score": score, "total": total})
+        log_event(user_id, "word_training_completed", {"score": score, "total": total, "topic": topic_code})
+        USER_CHAT_SESSIONS.pop(user_id, None)
         return
-        
+    
     q = questions[idx]
     q_text = q["question"]
     
-    # Title based on type
     if q["type"] == "en_ru":
         title = f"Как переводится: <b>{q_text}</b>?"
     else:
         title = f"Как будет на английском: <b>{q_text}</b>?"
-        
+    
     kb = InlineKeyboardMarkup(row_width=1)
     for opt in q["options"]:
-        # We pass the index of the option in the list to verify answer? 
-        # Or just pass "correct" / "incorrect"?
-        # Passing full text might be too long for callback_data (64 bytes limit).
-        # Let's pass 1 if correct, 0 if incorrect.
         is_correct = "1" if opt == q["correct"] else "0"
-        # We need to handle potential duplicates in options if dictionary is small?
-        # Logic above ensures options are unique if source rows are unique.
-        
-        # Truncate option text for button label if too long
         label = opt[:30] + "..." if len(opt) > 30 else opt
         kb.add(InlineKeyboardButton(label, callback_data=f"train:ans:{is_correct}"))
-        
+    
     kb.add(InlineKeyboardButton("Меню 🏠", callback_data="menu:main"))
     
     step_info = f"Вопрос {idx + 1} из {len(questions)}"
@@ -3446,21 +3663,22 @@ async def handle_training_answer(c: types.CallbackQuery):
     session = USER_CHAT_SESSIONS.get(user_id)
     if not session or session.get("type") != "word_training":
         await c.answer("Сессия истекла.", show_alert=True)
-        await c.message.edit_text("Сессия истекла.", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]]))
+        await c.message.edit_text(
+            "Сессия истекла.", 
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton("Меню 🏠", callback_data="menu:main")]])
+        )
         return
-        
+    
     is_correct = c.data.split(":")[2] == "1"
     
     if is_correct:
         session["score"] += 1
         await c.answer("Верно! ✅")
     else:
-        # Show correct answer? 
-        # For now just move on, maybe show alert
         q = session["questions"][session["current_index"]]
         correct = q["correct"]
         await c.answer(f"Неверно ❌\nПравильно: {correct}", show_alert=True)
-        
+    
     session["current_index"] += 1
     await send_training_question(c.message, user_id)
 
@@ -4683,6 +4901,8 @@ if __name__ == '__main__':
     init_game_tables()
     # Initialize grammar module (tables + seed topics)
     init_grammar_module()
+    # Initialize word training tables
+    init_word_training_tables()
     
     # Check if we should run with webhook
     use_webhook = os.getenv("USE_WEBHOOK", "false").lower() == "true"
