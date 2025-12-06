@@ -414,8 +414,96 @@ def fetch_article(url: str, min_sentences: int = 10):
         return (None, None)
 
 
+# ─────────────────────────────────────────────────────────────
+# News Cache Functions
+# ─────────────────────────────────────────────────────────────
+
+def cache_news_article(article: dict, topic: str = None):
+    """Save article to news_cache for future use."""
+    if not article.get("url"):
+        return
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO news_cache (url, title, summary, image, topic, cached_at)
+                VALUES (%s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (url) DO UPDATE SET
+                    title = COALESCE(EXCLUDED.title, news_cache.title),
+                    summary = COALESCE(EXCLUDED.summary, news_cache.summary),
+                    image = COALESCE(EXCLUDED.image, news_cache.image),
+                    topic = COALESCE(EXCLUDED.topic, news_cache.topic),
+                    cached_at = NOW()
+            """, (
+                article.get("url"),
+                article.get("title"),
+                article.get("description"),
+                article.get("image"),
+                topic
+            ))
+            conn.commit()
+    except Exception:
+        logging.exception("[news_cache] Failed to cache article")
+
+
+def get_cached_news_articles(topic: str = None, limit: int = 10) -> list:
+    """
+    Get articles from news_cache.
+    - topic: filter by topic (optional)
+    - limit: max articles to return
+    
+    Returns newest articles first, prioritizing those with images.
+    """
+    try:
+        with closing(db()) as conn:
+            c = conn.cursor()
+            
+            # Build query with optional topic filter
+            if topic:
+                c.execute("""
+                    SELECT url, title, summary, image, topic, cached_at
+                    FROM news_cache 
+                    WHERE topic = %s
+                    ORDER BY 
+                        CASE WHEN image IS NOT NULL AND image != '' THEN 0 ELSE 1 END,
+                        cached_at DESC
+                    LIMIT %s
+                """, (topic, limit))
+            else:
+                c.execute("""
+                    SELECT url, title, summary, image, topic, cached_at
+                    FROM news_cache 
+                    ORDER BY 
+                        CASE WHEN image IS NOT NULL AND image != '' THEN 0 ELSE 1 END,
+                        cached_at DESC
+                    LIMIT %s
+                """, (limit,))
+            
+            rows = c.fetchall()
+            
+            articles = []
+            for row in rows:
+                articles.append({
+                    "url": row[0],
+                    "title": row[1],
+                    "description": row[2],  # summary -> description for compatibility
+                    "image": row[3],
+                })
+            
+            logging.info(f"[news_cache] Retrieved {len(articles)} articles for topic={topic}")
+            return articles
+            
+    except Exception:
+        logging.exception("[news_cache] Failed to get cached articles")
+        return []
+
+
 def get_gnews_articles(topic=None, limit=10):
-    """Query GNews API and return a list of articles with keys title, description, url, image."""
+    """
+    Query GNews API and return a list of articles.
+    Falls back to cached articles if API fails or rate limit exceeded.
+    Caches successful responses for future use.
+    """
     try:
         params = {"token": GNEWS_API_KEY, "lang": "en", "max": limit}
         if topic:
@@ -427,31 +515,48 @@ def get_gnews_articles(topic=None, limit=10):
         # If q is a recognized GNews topic, call top-headlines with topic param
         if q in GNEWS_ALLOWED_TOPICS:
             params["topic"] = q
-            logging.debug(f"GNews: using top-headlines topic={q}")
+            logging.debug(f"[GNews] using top-headlines topic={q}")
             resp = requests.get("https://gnews.io/api/v4/top-headlines", params=params, timeout=8)
         else:
             # fallback to search by keyword
-            logging.debug(f"GNews: using search q={q}")
+            logging.debug(f"[GNews] using search q={q}")
             search_params = {"token": GNEWS_API_KEY, "lang": "en", "max": limit}
             if q:
                 search_params["q"] = q
             resp = requests.get("https://gnews.io/api/v4/search", params=search_params, timeout=8)
+        
+        # Check for rate limit or auth errors - fallback to cache
+        if resp.status_code in (403, 429):
+            logging.warning(f"[GNews] Rate limit or forbidden: {resp.status_code}, falling back to cache")
+            return get_cached_news_articles(topic, limit)
+        
         resp.raise_for_status()
         data = resp.json()
         articles = []
         for a in data.get("articles", []):
-            articles.append(
-                {
-                    "title": a.get("title"),
-                    "description": a.get("description"),
-                    "url": a.get("url"),
-                    "image": a.get("image"),
-                }
-            )
+            article = {
+                "title": a.get("title"),
+                "description": a.get("description"),
+                "url": a.get("url"),
+                "image": a.get("image"),
+            }
+            articles.append(article)
+            # Cache each article with topic
+            cache_news_article(article, topic)
+        
+        if not articles:
+            logging.info(f"[GNews] Returned 0 articles for topic={topic}, trying cache")
+            return get_cached_news_articles(topic, limit)
+        
+        logging.info(f"[GNews] Got {len(articles)} fresh articles for topic={topic}")
         return articles
+        
+    except requests.exceptions.Timeout:
+        logging.warning(f"[GNews] Timeout for topic={topic}, falling back to cache")
+        return get_cached_news_articles(topic, limit)
     except Exception:
-        logging.exception("GNews API request failed")
-        return []
+        logging.exception("[GNews] API request failed, falling back to cache")
+        return get_cached_news_articles(topic, limit)
 
 
 SYSTEM_PROMPT = """You are “PenPal English,” a friendly pen-pal and English tutor.
