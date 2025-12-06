@@ -125,13 +125,19 @@ Analyze this spoken English text and provide feedback:
 Respond in JSON format:
 {{
     "original": "<the original text>",
-    "corrected": "<corrected version if there are errors, or same as original if perfect>",
+    "corrected": "<corrected version with **bold** markers around each corrected word/phrase, or same as original if perfect. Example: 'I **have** a dog' if original was 'I has a dog'>",
     "has_errors": <true if there are grammar/vocabulary errors, false if text is correct>,
     "grammar_feedback": "<brief, friendly explanation of grammar issues in Russian, or '✨ Грамматика отличная!' if no errors>",
     "vocabulary_feedback": "<brief vocabulary tips or alternatives in Russian, or '👍 Хороший выбор слов!' if good>",
     "pronunciation_tips": "<1-2 words that might be tricky to pronounce, with phonetic hint, or empty if none>",
     "score": <0-100 overall score>
 }}
+
+IMPORTANT for "corrected" field:
+- Wrap ONLY the corrected words in **double asterisks** 
+- Do NOT wrap unchanged words
+- Example: Original "I goes to school" → Corrected "I **go** to school"
+- Example: Original "She have two cat" → Corrected "She **has** two **cats**"
 
 Keep feedback SHORT and FRIENDLY (Max's style - supportive, not lecturing).
 Focus on 1-2 most important issues, not everything.
@@ -193,6 +199,12 @@ If the text is good, celebrate it!"""
         }
 
 
+def _markdown_to_html(text: str) -> str:
+    """Convert **bold** markdown to <b>bold</b> HTML."""
+    import re
+    return re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+
+
 def format_voice_feedback(analysis: dict) -> str:
     """
     Format analysis results as a user-friendly message.
@@ -210,6 +222,9 @@ def format_voice_feedback(analysis: dict) -> str:
     vocabulary_feedback = analysis.get("vocabulary_feedback", "")
     pronunciation_tips = analysis.get("pronunciation_tips", "")
     score = analysis.get("score", 0)
+    
+    # Convert markdown bold to HTML bold in corrected text
+    corrected_html = _markdown_to_html(corrected)
     
     # Score emoji
     if score >= 90:
@@ -231,7 +246,7 @@ def format_voice_feedback(analysis: dict) -> str:
         lines.extend([
             "",
             f"✨ <b>Исправленный вариант:</b>",
-            f"<i>{corrected}</i>",
+            f"<i>{corrected_html}</i>",
         ])
     
     if grammar_feedback:
@@ -280,6 +295,9 @@ def format_text_feedback(analysis: dict) -> str:
     if not has_errors and score >= 90:
         return ""
     
+    # Convert markdown bold to HTML bold in corrected text
+    corrected_html = _markdown_to_html(corrected)
+    
     # Score emoji
     if score >= 90:
         score_emoji = "🌟"
@@ -295,7 +313,7 @@ def format_text_feedback(analysis: dict) -> str:
     if has_errors and corrected != original:
         lines.extend([
             f"✨ <b>Исправленный вариант:</b>",
-            f"<i>{corrected}</i>",
+            f"<i>{corrected_html}</i>",
             "",
         ])
     
